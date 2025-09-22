@@ -48,7 +48,11 @@
     .tx-pills { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .tx-empty { text-align:center; opacity:0.8; padding:12px 0; }
     .tx-note { font-size:12px; opacity:0.7; margin-top:6px; text-align:center; }
-    .tx-badge { font-size:12px; padding:2px 8px; border-radius:999px; background:#333; margin-left:8px; }
+
+    /* Link-as-button */
+    .link-row { display:flex; justify-content:center; }
+    .pill-link { text-decoration:none; color:#000000; }
+    .pill-link:hover { filter:brightness(0.95); }
   </style>
 </head>
 <body>
@@ -140,15 +144,24 @@
     <div class="card" style="margin-top:14px;">
       <div class="tx-title">Transactions</div>
       <div id="txList" class="tx-list">
-        <div class="tx-empty">No transactions yet.</div>
+        <!-- For now: just show GalaScan link -->
+        <div class="link-row">
+          <a
+            class="pill pill-link"
+            href="https://galascan.gala.com/wallet/eth%7Ca3091d66587F9f6BF2F9B5Fd03e015fA2e5d440a"
+            target="_blank" rel="noopener noreferrer"
+            >View full history on GalaScan →</a>
+        </div>
       </div>
-      <div id="txNote" class="tx-note"></div>
+      <div id="txNote" class="tx-note">Live history coming soon.</div>
     </div>
   </div>
 
   <script>
     const API_BASE = '/.netlify/functions/sidecar';
-    const DISPLAY_TZ = 'America/Los_Angeles'; // set desired display timezone
+
+    // Turn this off later when you want to re-enable in-page tx fetching
+    const USE_GALASCAN_LINK_ONLY = true;
 
     const $ = id => document.getElementById(id);
     const pGALA=$('pGALA'), pUSDC=$('pUSDC'), pETH=$('pETH');
@@ -162,183 +175,72 @@
     };
     const toNum = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
 
-    // normalize seconds/ms/ISO → epoch ms
-    function parseTsAny(t) {
-      if (t == null) return null;
-      if (typeof t === 'number') return t < 2e10 ? Math.round(t*1000) : Math.round(t);
-      if (typeof t === 'string') {
-        const n = Number(t);
-        if (Number.isFinite(n)) return n < 2e10 ? Math.round(n*1000) : Math.round(n);
-        const ms = Date.parse(t);
-        if (Number.isFinite(ms)) return ms;
-      }
-      return null;
-    }
-
-    function fmtTime(anyTs) {
-      const ms = parseTsAny(anyTs);
-      if (!ms) return '—';
-      const d = new Date(ms);
-      if (isNaN(d.getTime())) return '—';
-      return d.toLocaleString(undefined, {
-        year:'numeric', month:'short', day:'2-digit',
-        hour:'2-digit', minute:'2-digit', second:'2-digit',
-        timeZone: DISPLAY_TZ, timeZoneName:'short'
-      });
-    }
-
     let latestPrices = { GALA: null, ETH: null, USDC: 1 };
+    let lastBalances = { GUSDC: null, GALA: null, GWETH: null };
+
     async function fetchPrices() {
-      const r = await fetch(`${API_BASE}/prices`);
-      if (!r.ok) throw new Error('prices ' + r.status);
-      const j = await r.json();
-      const P = j.prices || {};
-      latestPrices = {
-        GALA: toNum(P.GALA),
-        ETH:  toNum(P.ETH),
-        USDC: toNum(P.USDC) || 1
-      };
-      pGALA.textContent = fmtUSD(latestPrices.GALA);
-      pUSDC.textContent = fmtUSD(latestPrices.USDC);
-      pETH .textContent = fmtUSD(latestPrices.ETH);
+      try {
+        const r = await fetch(`${API_BASE}/prices`);
+        if (!r.ok) throw new Error('prices ' + r.status);
+        const j = await r.json();
+        const P = j.prices || {};
+        latestPrices = {
+          GALA: toNum(P.GALA),
+          ETH:  toNum(P.ETH),
+          USDC: toNum(P.USDC) || 1
+        };
+        pGALA.textContent = fmtUSD(latestPrices.GALA);
+        pUSDC.textContent = fmtUSD(latestPrices.USDC);
+        pETH .textContent = fmtUSD(latestPrices.ETH);
+      } catch (e) {
+        console.error(e);
+      }
     }
 
     async function fetchBalances() {
-      const r = await fetch(`${API_BASE}/assets`);
-      if (!r.ok) {
-        bUSDC.textContent = 'N/A';
-        bGALA.textContent = 'N/A';
-        bETH .textContent = 'N/A';
-        bTOTAL.textContent = 'N/A';
-        throw new Error('assets ' + r.status);
-      }
-      const j = await r.json();
-      const arr = Array.isArray(j.tokens) ? j.tokens : [];
-      const map = new Map(arr.map(t => [String(t.symbol).toUpperCase(), String(t.quantity)]));
-      const qUSDC = map.get('GUSDC');
-      const qGALA = map.get('GALA');
-      const qWETH = map.get('GWETH');
-      bUSDC.textContent = qUSDC ?? 'N/A';
-      bGALA.textContent = qGALA ?? 'N/A';
-      bETH .textContent = qWETH ?? 'N/A';
-
-      const total =
-        (toNum(qUSDC)) +
-        (toNum(qGALA) * (latestPrices.GALA || 0)) +
-        (toNum(qWETH) * (latestPrices.ETH  || 0));
-      bTOTAL.textContent = isNaN(total) ? 'N/A' : fmtUSD(total);
-    }
-
-    // ---------- Transactions (DexV3Contract:BatchSubmit:Swap) ----------
-    function renderSwaps(rows, note='') {
-      if (!Array.isArray(rows) || rows.length === 0) {
-        txList.innerHTML = '<div class="tx-empty">No transactions yet.</div>';
-        txNote.textContent = note || '';
-        return;
-      }
-
-      // Only keep the target method (sidecar should already filter, this is a safeguard)
-      const filtered = rows.filter(r => {
-        const m = (r.method || r.meta?.method || '').toLowerCase();
-        return m.includes('dexv3contract:batchsubmit:swap');
-      });
-
-      filtered.sort((a,b) => {
-        const ta = parseTsAny(a.timestamp ?? a.ts ?? a.meta?.timestamp) || 0;
-        const tb = parseTsAny(b.timestamp ?? b.ts ?? b.meta?.timestamp) || 0;
-        return tb - ta;
-      });
-
-      txList.innerHTML = filtered.map(tx => {
-        const rawTs = tx.timestamp ?? tx.ts ?? tx.meta?.timestamp;
-        const label = fmtTime(rawTs) || '—';
-
-        // after balances (various shapes supported)
-        const after = tx.after || tx.afterBalances || tx.balancesAfter || {};
-        const usdcStr = String(after.GUSDC ?? after.USDC ?? '—');
-        const galaStr = String(after.GALA  ?? '—');
-        const wethStr = String(after.GWETH ?? after.WETH ?? '—');
-
-        // historical pricing:
-        // 1) prefer exact total if provided (usdTotalAt)
-        // 2) otherwise compute from pricesAt if present
-        // 3) otherwise show ≈ using current prices
-        let totalLabel = '—';
-        if (tx.usdTotalAt != null && isFinite(Number(tx.usdTotalAt))) {
-          totalLabel = fmtUSD(Number(tx.usdTotalAt));
-        } else if (tx.pricesAt && (tx.pricesAt.USDC || tx.pricesAt.GALA || tx.pricesAt.ETH)) {
-          const P = tx.pricesAt;
-          const tot =
-            (toNum(usdcStr)) +
-            (toNum(galaStr) * toNum(P.GALA)) +
-            (toNum(wethStr) * toNum(P.ETH));
-          totalLabel = fmtUSD(tot);
-        } else {
-          const approx =
-            (toNum(usdcStr)) +
-            (toNum(galaStr) * (latestPrices.GALA || 0)) +
-            (toNum(wethStr) * (latestPrices.ETH  || 0));
-          totalLabel = '≈' + fmtUSD(approx);
-        }
-
-        const id = tx.txId || tx.hash || tx.meta?.txId || tx.meta?.hash || '';
-        const ms = parseTsAny(rawTs);
-        const iso = ms ? new Date(ms).toISOString() : '';
-
-        return `
-          <div class="tx-row" title="${iso ? `ISO: ${iso}` : ''}">
-            <div class="tx-time">
-              ${label}
-              ${id ? ` — <span style="opacity:.7">(${id.slice(0,6)}…${id.slice(-6)})</span>` : ''}
-              <span class="tx-badge">Swap</span>
-            </div>
-            <div class="tx-pills">
-              <span class="pill">USDC: ${usdcStr}</span>
-              <span class="pill">GALA: ${galaStr}</span>
-              <span class="pill">ETH: ${wethStr}</span>
-              <span class="pill">Total @ time: ${totalLabel}</span>
-            </div>
-          </div>
-        `;
-      }).join('');
-
-      txNote.textContent = note || (
-        'Showing DexV3Contract:BatchSubmit:Swap only. Times shown in ' + DISPLAY_TZ +
-        '. Totals prefer historical prices; “≈” means current-price approximation.'
-      );
-    }
-
-    async function fetchSwaps() {
-      // Try enriched swap feed (filtered by method) first
       try {
-        let r = await fetch(`${API_BASE}/swaps?limit=100`);
-        if (!r.ok) {
-          // fall back to your existing tx history (no seeding = no fake "now" rows)
-          r = await fetch(`${API_BASE}/txs/usd?limit=100&seed=0`);
-        }
-        if (!r.ok) throw new Error('swaps/txs ' + r.status);
+        const r = await fetch(`${API_BASE}/assets`);
+        if (!r.ok) throw new Error('assets ' + r.status);
         const j = await r.json();
-        const list = Array.isArray(j.swaps) ? j.swaps : (Array.isArray(j.txs) ? j.txs : []);
-        renderSwaps(list);
+        const arr = Array.isArray(j.tokens) ? j.tokens : [];
+        const map = new Map(arr.map(t => [String(t.symbol).toUpperCase(), String(t.quantity)]));
+        const qUSDC = map.get('GUSDC');
+        const qGALA = map.get('GALA');
+        const qWETH = map.get('GWETH');
+        bUSDC.textContent = qUSDC ?? 'N/A';
+        bGALA.textContent = qGALA ?? 'N/A';
+        bETH .textContent = qWETH ?? 'N/A';
+        lastBalances = {
+          GUSDC: qUSDC != null ? toNum(qUSDC) : null,
+          GALA:  qGALA != null ? toNum(qGALA)  : null,
+          GWETH: qWETH != null ? toNum(qWETH) : null
+        };
+        const total =
+          (lastBalances.GUSDC ?? 0) +
+          (lastBalances.GALA  ?? 0) * (latestPrices.GALA || 0) +
+          (lastBalances.GWETH ?? 0) * (latestPrices.ETH  || 0);
+        bTOTAL.textContent = isNaN(total) ? 'N/A' : fmtUSD(total);
       } catch (e) {
         console.error(e);
-        renderSwaps([], 'No transactions found.');
+        bUSDC.textContent = bGALA.textContent = bETH.textContent = bTOTAL.textContent = 'N/A';
       }
+    }
+
+    // ------- (kept for future) transactions code is disabled while link-only mode is on -------
+    async function fetchTxs() {
+      if (USE_GALASCAN_LINK_ONLY) return; // short-circuit
+      // (your previous tx fetching/rendering code can live here for later)
     }
 
     async function refreshAll() {
-      try {
-        await fetchPrices();
-        await fetchBalances();
-        await fetchSwaps();
-      } catch (e) {
-        console.error(e);
-      }
+      await fetchPrices();
+      await fetchBalances();
+      await fetchTxs();
     }
 
     setInterval(() => fetchPrices().catch(()=>{}), 5000);
     setInterval(() => fetchBalances().catch(()=>{}), 10000);
-    setInterval(() => fetchSwaps().catch(()=>{}), 15000);
+    // no tx polling while link-only
     refreshAll();
   </script>
 </body>
