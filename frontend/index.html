@@ -10,15 +10,15 @@
       src: url('Qahiri-Regular.ttf') format('truetype');
       font-weight: lighter;
       font-style: normal;
-    } 
-    :root { --bg:#000000; --card:#f59e47; --muted:##f59e47; --text:#e8edff; }
+    }
+    :root { --bg:#000000; --card:#f59e47; --muted:#f59e47; --text:#e8edff; }
     body {
       margin:0;
       font-family:'Qahiri',system-ui,-apple-system,Segoe UI,Roboto,Arial;
-      background-image: url("background.jpg"); /* replace with your file or URL */
-      background-size: cover;       /* make it fill the screen */
-      background-position: center;  /* keep it centered */
-      background-repeat: no-repeat; /* don’t tile */
+      background-image: url("background.jpg");
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
       color: var(--text);
     }
     .wrap { max-width:880px; margin:32px auto; padding:0 16px; }
@@ -27,27 +27,33 @@
     .g3 { grid-template-columns:repeat(3,1fr); }
     .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
     .title-container { display:flex; justify-content:center; align-items:center; margin-top:50px; margin-bottom:75px; }
-    .description-container { display:flex; justify-content:center; align-items:center; margin-top:20px; margin-bottom:20px; }    
+    .description-container { display:flex; justify-content:center; align-items:center; margin-top:20px; margin-bottom:20px; }
     .title-img { width:100%; max-width:500px; height:auto; object-fit:contain; }
     .description-img { width:100%; max-width:250px; height:auto; object-fit:contain; }
     .description2-img { width:100%; max-width:125px; height:auto; object-fit:contain; }
-    .muted { color:#FFFFFF; font-weight:bold; font-size:40px;}
-    .pill { display:inline-block; padding:5px 30px; border:2px solid #9c6025; border-radius:999px; font-family:monospace; background:#edba87; color:#000000;}
+    .muted { color:#FFFFFF; font-weight:bold; font-size:40px; }
+    .pill { display:inline-block; padding:5px 30px; border:2px solid #9c6025; border-radius:999px; font-family:monospace; background:#edba87; color:#000000; }
     .right { text-align:right; }
     .text-value-pair { display:flex; gap:8px; justify-content:center; align-items:center; }
     .text-descriptions { display:flex; gap:8px; margin-top:100px; margin-bottom:80px; margin-left:200px; margin-right:200px; justify-content:center; align-items:center; }
     .text-titles { display:flex; gap:8px; margin-top:50px; margin-bottom:20px; margin-left:200px; margin-right:200px; justify-content:center; align-items:center; }
 
-    /* Logo + Label styling */
-    .token-label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    /* Logo + Label */
+    .token-label { display:flex; align-items:center; gap:8px; }
+    .token-label img { height:40px; width:auto; }
+
+    /* Transactions */
+    .tx-title { font-size:28px; font-weight:bold; margin:4px 0 12px; text-align:center; }
+    .tx-list { display:flex; flex-direction:column; gap:10px; }
+    .tx-row {
+      display:flex; align-items:center; justify-content:space-between;
+      gap:12px; flex-wrap:wrap; padding:10px 12px;
+      border:1px solid #9c6025; border-radius:12px; background:#0a0a0a;
     }
-    .token-label img {
-      height: 40px; /* match .muted font size */
-      width: auto;
-    }
+    .tx-time { font-family:monospace; opacity:0.9; }
+    .tx-pills { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .tx-empty { text-align:center; opacity:0.8; padding:12px 0; }
+    .tx-note { font-size:12px; opacity:0.7; margin-top:6px; text-align:center; }
   </style>
 </head>
 <body>
@@ -134,6 +140,16 @@
         </div>
       </div>
     </div>
+
+    <!-- Transactions -->
+    <div class="card" style="margin-top:14px;">
+      <div class="tx-title">Transactions</div>
+      <div id="txList" class="tx-list">
+        <div class="tx-empty">No transactions yet.</div>
+      </div>
+      <div id="txNote" class="tx-note"></div>
+    </div>
+
     <h1 class="text-descriptions"></h1>
   </div>
 
@@ -142,17 +158,25 @@
     const $ = id => document.getElementById(id);
     const pGALA=$('pGALA'), pUSDC=$('pUSDC'), pETH=$('pETH');
     const bUSDC=$('bUSDC'), bGALA=$('bGALA'), bETH=$('bETH'), bTOTAL=$('bTOTAL');
-    const msg = $('msg');
+    const txList=$('txList'), txNote=$('txNote');
+
     const fmtUSD = (n) => {
       if (n == null || !isFinite(n)) return '—';
       return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     };
-    const toNum = (v) => {
-      const n = Number(v);
-      return isFinite(n) ? n : 0;
+    const toNum = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
+    const fmtTime = (t) => {
+      const ms = String(t).length <= 10 ? Number(t) * 1000 : Number(t);
+      const d = new Date(ms);
+      return isNaN(d.getTime()) ? '—' : d.toLocaleString(undefined, {
+        year:'numeric', month:'short', day:'2-digit',
+        hour:'2-digit', minute:'2-digit', second:'2-digit'
+      });
     };
+
     let latestPrices = { GALA: null, ETH: null, USDC: 1 };
     let lastBalances = { GUSDC: null, GALA: null, GWETH: null };
+
     async function fetchPrices() {
       const r = await fetch(`${API_BASE}/prices`);
       if (!r.ok) throw new Error('prices ' + r.status);
@@ -167,6 +191,7 @@
       pUSDC.textContent = fmtUSD(latestPrices.USDC);
       pETH .textContent = fmtUSD(latestPrices.ETH);
     }
+
     async function fetchBalances() {
       const r = await fetch(`${API_BASE}/assets`);
       if (!r.ok) {
@@ -178,7 +203,7 @@
       }
       const j = await r.json();
       const arr = Array.isArray(j.tokens) ? j.tokens : [];
-      const map = new Map(arr.map(t => [t.symbol, String(t.quantity)]));
+      const map = new Map(arr.map(t => [String(t.symbol).toUpperCase(), String(t.quantity)]));
       const qUSDC = map.get('GUSDC');
       const qGALA = map.get('GALA');
       const qWETH = map.get('GWETH');
@@ -200,16 +225,90 @@
         bTOTAL.textContent = isNaN(total) ? 'N/A' : fmtUSD(total);
       }
     }
+
+    // --- Transactions UI ---
+    function renderTxs(txs, note='') {
+      if (!Array.isArray(txs) || txs.length === 0) {
+        txList.innerHTML = '<div class="tx-empty">No transactions yet.</div>';
+        txNote.textContent = note || '';
+        return;
+      }
+      // newest first
+      txs.sort((a,b) => Number(b.ts||b.time||b.timestamp||0) - Number(a.ts||a.time||a.timestamp||0));
+      txList.innerHTML = txs.map(tx => {
+        const ts = tx.ts ?? tx.time ?? tx.timestamp ?? Date.now();
+        const after = tx.after || {};
+        const usdc = after.GUSDC ?? after.USDC ?? '—';
+        const gala = after.GALA  ?? '—';
+        const weth = after.GWETH ?? after.WETH ?? '—';
+        return `
+          <div class="tx-row">
+            <div class="tx-time">${fmtTime(ts)}</div>
+            <div class="tx-pills">
+              <span class="pill">USDC: ${usdc}</span>
+              <span class="pill">GALA: ${gala}</span>
+              <span class="pill">ETH: ${weth}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+      txNote.textContent = note || '';
+    }
+
+    // If /txs is empty, fall back to a single snapshot row from /assets
+    async function fallbackSnapshot() {
+      try {
+        const r = await fetch(`${API_BASE}/assets`);
+        if (!r.ok) throw new Error('assets ' + r.status);
+        const j = await r.json();
+        const arr = Array.isArray(j.tokens) ? j.tokens : [];
+        const map = new Map(arr.map(t => [String(t.symbol).toUpperCase(), String(t.quantity)]));
+        const row = {
+          ts: Date.now(),
+          after: {
+            GUSDC: map.get('GUSDC') ?? '0',
+            GALA:  map.get('GALA')  ?? '0',
+            GWETH: map.get('GWETH') ?? '0'
+          },
+          meta: { seeded: true }
+        };
+        renderTxs([row], 'Showing current snapshot (no tx history available yet).');
+      } catch {
+        renderTxs([], 'No transactions yet.');
+      }
+    }
+
+    async function fetchTxs() {
+      try {
+        const r = await fetch(`${API_BASE}/txs?limit=50`);
+        if (!r.ok) throw new Error('txs ' + r.status);
+        const j = await r.json();
+        const list = Array.isArray(j.txs) ? j.txs : [];
+        if (list.length === 0) {
+          // fallback to snapshot so you always see at least one row
+          await fallbackSnapshot();
+        } else {
+          renderTxs(list);
+        }
+      } catch (e) {
+        console.error(e);
+        await fallbackSnapshot();
+      }
+    }
+
     async function refreshAll() {
       try {
         await fetchPrices();
         await fetchBalances();
+        await fetchTxs();
       } catch (e) {
         console.error(e);
       }
     }
+
     setInterval(() => fetchPrices().catch(()=>{}), 5000);
     setInterval(() => fetchBalances().catch(()=>{}), 10000);
+    setInterval(() => fetchTxs().catch(()=>{}), 15000);
     refreshAll();
   </script>
 </body>
