@@ -16,7 +16,6 @@ function splitEthBar(w) {
   if (!prefix || !rest) return { ok: false };
   return { ok: true, prefix, rest };
 }
-
 function normalizeWalletNo0x(w) {
   const sp = splitEthBar(w);
   if (!sp.ok) return '';
@@ -26,11 +25,9 @@ function normalizeWalletNo0x(w) {
   if (!/^[a-f0-9]{40}$/.test(hex)) return '';
   return `${prefix}|${hex}`;
 }
-
 function validEthNamespaceNo0x(w) {
   return /^eth\|[a-f0-9]{40}$/.test(String(w).toLowerCase());
 }
-
 function maskPK(pk) {
   if (!pk) return '(none)';
   const s = String(pk);
@@ -48,7 +45,6 @@ function normEpochMs(v) {
   if (!Number.isFinite(n) || n <= 0) return 0;
   return n < 2e10 ? Math.round(n * 1000) : Math.round(n);
 }
-
 // Attempt to pull a timestamp out of an arbitrary object
 function extractTxTimestamp(obj) {
   if (!obj || typeof obj !== 'object') return 0;
@@ -118,7 +114,6 @@ const sdkOpts = {
   bundlingAPIBasePath: '/bundle',
 };
 if (PRIVATE_KEY) sdkOpts.signer = new PrivateKeySigner(PRIVATE_KEY);
-
 const gswap = new GSwap(sdkOpts);
 
 // ---------------------- Token Class Keys ----------------------
@@ -149,7 +144,6 @@ function normalizeTokensShape(j) {
   if (Array.isArray(j))         return { tokens: j,        count: j.length };
   return { tokens: [], count: 0 };
 }
-
 function addrVariants(ownerNo0x) {
   const m = /^eth\|([a-f0-9]{40})$/.exec(String(ownerNo0x).toLowerCase());
   if (!m) return [];
@@ -165,13 +159,11 @@ function addrVariants(ownerNo0x) {
     { key: 'owner',   value: hex },
   ];
 }
-
 async function tryFetch(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
 }
-
 async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
   const candidates = [];
   const av = addrVariants(ownerNo0x);
@@ -180,10 +172,8 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
     candidates.push(`${GATEWAY_BASE_URL}/api/asset/token-contract/assets?${a.key}=${encodeURIComponent(a.value)}&page=${page}&limit=${limit}`);
     candidates.push(`${DEX_BACKEND_BASE_URL}/user/assets?${a.key}=${encodeURIComponent(a.value)}&page=${page}&limit=${limit}`);
   }
-
   const connectBodies = av.map(a => ({ owner: a.value }));
   const errors = [];
-
   for (const url of candidates) {
     try {
       const j = await tryFetch(url);
@@ -193,7 +183,6 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
       errors.push({ url, err: String(e?.message || e) });
     }
   }
-
   for (const body of connectBodies) {
     try {
       const r = await fetch(`${GALACONNECT_BASE_URL}/galachain/api/asset/token-contract/FetchBalances`, {
@@ -213,10 +202,8 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
       errors.push({ url: `${GALACONNECT_BASE_URL}/galachain/api/asset/token-contract/FetchBalances`, err: String(e?.message || e), body });
     }
   }
-
   return { ok: false, errors };
 }
-
 // Return the three core balances as strings
 async function fetchCoreBalances() {
   let data;
@@ -228,7 +215,6 @@ async function fetchCoreBalances() {
   }
   const tokens = Array.isArray(data?.tokens) ? data.tokens : [];
   const bySymbol = new Map(tokens.map(t => [String(t.symbol).toUpperCase(), String(t.quantity)]));
-
   return {
     GUSDC: bySymbol.get('GUSDC') ?? '0',
     GALA:  bySymbol.get('GALA')  ?? '0',
@@ -236,60 +222,82 @@ async function fetchCoreBalances() {
   };
 }
 
-// ---------------------- Explorer helpers (tx timestamp) ----------------------
+// ---------------------- Explorer helpers (tx scanning + timestamps) ----------------------
 function txMatches(obj, txId) {
   const cand = [obj?.txid, obj?.txId, obj?.hash, obj?.transactionHash, obj?.id];
   return cand.some(v => v && String(v).toLowerCase() === String(txId).toLowerCase());
 }
-
 function pickTxTimestamp(hit, blk) {
   const ms = normEpochMs(hit?.timestamp || hit?.time || hit?.date) || normEpochMs(blk?.timestamp || blk?.time || blk?.date);
   return ms || 0;
 }
-
 async function explorerLatestHeight(channel) {
   const u = `${EXPLORER_BASE_URL}/height/${encodeURIComponent(channel)}`;
   const j = await tryFetch(u);
   return Number(j?.height ?? j ?? 0);
 }
-
 async function explorerBlock(channel, height) {
   const u = `${EXPLORER_BASE_URL}/blocks/${encodeURIComponent(channel)}/${encodeURIComponent(height)}`;
   return tryFetch(u);
 }
-
 async function findTxTimestamp(txId, channels) {
   const chans = Array.isArray(channels) && channels.length ? channels : EXPLORER_CHANNELS;
   for (const ch of chans) {
     try {
       let height = await explorerLatestHeight(ch);
       if (!height || !Number.isFinite(height)) continue;
-
       const max = Math.min(EXPLORER_LOOKBACK, height + 1);
       for (let i = 0; i < max && height - i >= 0; i++) {
         const h = height - i;
         let blk;
-        try {
-          blk = await explorerBlock(ch, h);
-        } catch { continue; }
-
+        try { blk = await explorerBlock(ch, h); } catch { continue; }
         const txs = Array.isArray(blk?.transactions)
           ? blk.transactions
           : (Array.isArray(blk?.txs) ? blk.txs : []);
-
         if (!txs || txs.length === 0) continue;
-
         const hit = txs.find(t => txMatches(t, txId));
         if (hit) {
           const ts = pickTxTimestamp(hit, blk);
-          return { channel: ch, block: h, timestamp: ts, tx: { id: hit?.txid || hit?.txId || hit?.hash || hit?.id } };
+          return { channel: ch, block: h, timestamp: ts, tx: { id: hit?.txid || hit?.txId || hit?.hash || hit?.id }, raw: hit };
         }
       }
-    } catch {
-      // try next channel
-    }
+    } catch { /* try next channel */ }
   }
   return null;
+}
+
+// Does the transaction involve the target wallet?
+function involvesWalletLoose(obj, walletHexNo0x) {
+  const variants = [
+    `eth|${walletHexNo0x}`,
+    `eth|0x${walletHexNo0x}`,
+    `0x${walletHexNo0x}`,
+    walletHexNo0x
+  ];
+  const seen = new Set();
+  function walk(x, depth = 0) {
+    if (x == null || depth > 3) return false;
+    if (typeof x === 'string') {
+      const s = x.toLowerCase();
+      return variants.some(v => s === v.toLowerCase());
+    }
+    if (typeof x === 'number' || typeof x === 'boolean') return false;
+    if (typeof x === 'object') {
+      if (seen.has(x)) return false;
+      seen.add(x);
+      if (Array.isArray(x)) {
+        for (const it of x) if (walk(it, depth + 1)) return true;
+      } else {
+        for (const k of Object.keys(x)) if (walk(x[k], depth + 1)) return true;
+      }
+    }
+    return false;
+  }
+  return walk(obj, 0);
+}
+function methodStringLower(tx) {
+  const m = tx?.method || tx?.name || tx?.type || tx?.call || tx?.action;
+  return (m ? String(m) : '').toLowerCase();
 }
 
 // ---------------------- Historical pricing (Coingecko) ----------------------
@@ -321,7 +329,6 @@ async function coingeckoPriceAtMs(id, tMs) {
   if (priceCache.size > 500) priceCache.delete(priceCache.keys().next().value);
   return best;
 }
-
 async function historicalUSD(symbol, tMs) {
   const s = String(symbol).toUpperCase();
   if (s === 'USDC' || s === 'GUSDC') return 1;
@@ -347,7 +354,7 @@ function pushTx(after, meta, tsOverride) {
   return entry;
 }
 
-// ---------------------- Routes ----------------------
+// ---------------------- Routes: basics ----------------------
 app.get('/', (_req, res) => res.json({
   ok: true,
   wallet: WALLET || null,
@@ -358,12 +365,10 @@ app.get('/', (_req, res) => res.json({
     bundler: BUNDLER_BASE_URL
   }
 }));
-
 app.get('/whoami', (_req, res) => res.json({
   wallet: WALLET || null,
   swapEnabled: Boolean(PRIVATE_KEY)
 }));
-
 app.get('/debug', (_req, res) => res.json({
   wallet: WALLET,
   hasPK: Boolean(PRIVATE_KEY),
@@ -378,7 +383,6 @@ app.get('/debug', (_req, res) => res.json({
     bundlingAPIBasePath: '/bundle'
   }
 }));
-
 app.get('/prices', async (_req, res) => {
   try {
     const [gala, eth, usdc] = await Promise.all([
@@ -392,13 +396,12 @@ app.get('/prices', async (_req, res) => {
   }
 });
 
-// UI-friendly assets
+// ---------------------- Assets (UI) ----------------------
 app.get('/assets', async (req, res) => {
   try {
     if (!WALLET) return res.status(400).json({ error: 'WALLET_ADDRESS not set or invalid' });
 
     const strict = req.query.strict === '1';
-
     let data;
     try {
       data = await gswap.assets.getUserAssets(WALLET, 1, 100);
@@ -417,7 +420,6 @@ app.get('/assets', async (req, res) => {
 
     const MUST_INCLUDE = ['GUSDC', 'GALA', 'GWETH'];
     const ensured = MUST_INCLUDE.map(sym => ({ symbol: sym, quantity: bySymbol.get(sym) ?? '0' }));
-
     const extras = tokens
       .filter(t => !MUST_INCLUDE.includes(String(t.symbol).toUpperCase()))
       .map(t => ({ symbol: String(t.symbol), quantity: String(t.quantity) }));
@@ -428,7 +430,7 @@ app.get('/assets', async (req, res) => {
   }
 });
 
-// ---------------------- Transactions (raw) ----------------------
+// ---------------------- Transactions (raw + USD) ----------------------
 app.get('/txs', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 50));
@@ -445,12 +447,10 @@ app.get('/txs', async (req, res) => {
     res.status(400).json({ error: e?.message || String(e) });
   }
 });
-
-// ---------------------- Transactions (with historical USD total) ----------------------
 app.get('/txs/usd', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
-    const resolveTimes = (req.query.resolve ?? '1') !== '0'; // attempt explorer lookup
+    const resolveTimes = (req.query.resolve ?? '1') !== '0';
 
     if (TX_LOG.length === 0) {
       try {
@@ -459,10 +459,8 @@ app.get('/txs/usd', async (req, res) => {
       } catch {}
     }
 
-    // Copy newest-first slice
     const list = TX_LOG.slice(-limit).reverse().map(x => ({ ...x, after: { ...x.after }, meta: { ...(x.meta||{}) } }));
 
-    // Resolve timestamps if missing but txId/hash present
     if (resolveTimes) {
       for (const tx of list) {
         const raw = tx.ts || tx.meta?.timestamp;
@@ -482,20 +480,17 @@ app.get('/txs/usd', async (req, res) => {
       }
     }
 
-    // Compute historical totals (Coingecko)
     for (const tx of list) {
       const tMs = normEpochMs(tx.ts || tx.meta?.timestamp) || Date.now();
       const usdc = Number(tx.after?.GUSDC ?? tx.after?.USDC ?? '0') || 0;
       const galaQ = Number(tx.after?.GALA ?? '0') || 0;
       const wethQ = Number(tx.after?.GWETH ?? tx.after?.WETH ?? '0') || 0;
 
-      // Fetch historical prices (errors fall back to current quotes)
       let pGala = null, pEth = null;
       try { pGala = await historicalUSD('GALA', tMs); } catch {}
       try { pEth  = await historicalUSD('ETH',  tMs); } catch {}
 
       if (!Number.isFinite(pGala) || !Number.isFinite(pEth)) {
-        // fallback to spot quotes if Coingecko not available
         const [spotGala, spotEth] = await Promise.all([
           priceInUSDC('GALA').then(Number).catch(() => 0),
           priceInUSDC('ETH').then(Number).catch(() => 0),
@@ -507,7 +502,6 @@ app.get('/txs/usd', async (req, res) => {
       const total = usdc + galaQ * pGala + wethQ * pEth;
       tx.usdTotalAt = Number.isFinite(total) ? Number(total.toFixed(8)) : null;
 
-      // (Optional) include the prices used when debug=1
       if ((req.query.debug || '') === '1') {
         tx.pricesAt = { GALA: pGala, ETH: pEth, USDC: 1, ts: tMs };
       }
@@ -519,19 +513,111 @@ app.get('/txs/usd', async (req, res) => {
   }
 });
 
+// ---------------------- NEW: /swaps (scan explorer for DexV3Contract:BatchSubmit:Swap) ----------------------
+app.get('/swaps', async (req, res) => {
+  try {
+    if (!WALLET) return res.status(400).json({ error: 'WALLET_ADDRESS not set or invalid' });
+
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 100));
+    const chans = String(req.query.channels || '').trim()
+      ? String(req.query.channels).split(',').map(s => s.trim()).filter(Boolean)
+      : EXPLORER_CHANNELS;
+
+    // derive wallet hex (no 0x)
+    const wMatch = /^eth\|([a-f0-9]{40})$/i.exec(WALLET);
+    const walletHex = wMatch ? wMatch[1].toLowerCase() : '';
+
+    const results = [];
+    for (const ch of chans) {
+      let height = 0;
+      try { height = await explorerLatestHeight(ch); } catch { continue; }
+      if (!height) continue;
+
+      const max = Math.min(EXPLORER_LOOKBACK, height + 1);
+      for (let i = 0; i < max && height - i >= 0; i++) {
+        const h = height - i;
+        let blk;
+        try { blk = await explorerBlock(ch, h); } catch { continue; }
+
+        const txs = Array.isArray(blk?.transactions) ? blk.transactions : (Array.isArray(blk?.txs) ? blk.txs : []);
+        if (!txs || txs.length === 0) continue;
+
+        for (const t of txs) {
+          const mStr = methodStringLower(t);
+          if (!mStr.includes('dexv3contract:batchsubmit:swap')) continue;
+
+          if (!walletHex || !involvesWalletLoose(t, walletHex)) continue;
+
+          const txId = t.txid || t.txId || t.hash || t.id || '';
+          const ts   = pickTxTimestamp(t, blk);
+          // Start building the row
+          const row = {
+            txId,
+            method: 'DexV3Contract:BatchSubmit:Swap',
+            timestamp: ts || 0,
+            channel: ch,
+            block: h
+          };
+
+          // If this swap went through our sidecar, merge the captured after-balances
+          const logHit = TX_LOG.find(x => (x.meta?.txId && String(x.meta.txId).toLowerCase() === String(txId).toLowerCase()));
+          if (logHit) {
+            row.after = { ...logHit.after };
+          }
+
+          results.push(row);
+          if (results.length >= limit) break;
+        }
+        if (results.length >= limit) break;
+      }
+      if (results.length >= limit) break;
+    }
+
+    // For each result, attach usdTotalAt using historical prices IF we have after-balances
+    for (const r of results) {
+      if (!r.after) continue; // we can’t conjure historical balances for swaps we didn’t execute here
+      const tMs = normEpochMs(r.timestamp) || Date.now();
+      const usdc = Number(r.after?.GUSDC ?? r.after?.USDC ?? '0') || 0;
+      const galaQ = Number(r.after?.GALA ?? '0') || 0;
+      const wethQ = Number(r.after?.GWETH ?? r.after?.WETH ?? '0') || 0;
+
+      let pGala = null, pEth = null;
+      try { pGala = await historicalUSD('GALA', tMs); } catch {}
+      try { pEth  = await historicalUSD('ETH',  tMs); } catch {}
+
+      if (!Number.isFinite(pGala) || !Number.isFinite(pEth)) {
+        const [spotGala, spotEth] = await Promise.all([
+          priceInUSDC('GALA').then(Number).catch(() => 0),
+          priceInUSDC('ETH').then(Number).catch(() => 0),
+        ]);
+        if (!Number.isFinite(pGala)) pGala = spotGala || 0;
+        if (!Number.isFinite(pEth))  pEth  = spotEth  || 0;
+      }
+      const total = usdc + galaQ * pGala + wethQ * pEth;
+      r.usdTotalAt = Number.isFinite(total) ? Number(total.toFixed(8)) : null;
+      r.pricesAt = { USDC: 1, GALA: pGala, ETH: pEth }; // optional extra context
+    }
+
+    // newest first
+    results.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    res.json({ wallet: WALLET || null, count: results.length, swaps: results });
+  } catch (e) {
+    res.status(400).json({ error: e?.message || String(e) });
+  }
+});
+
 // ---------------------- TX timestamp lookup ----------------------
 app.get('/tx-time', async (req, res) => {
   try {
     const txId = String(req.query.txId || req.query.hash || '').trim();
     const channels = String(req.query.channels || '').trim()
       ? String(req.query.channels).split(',').map(s => s.trim()).filter(Boolean) : EXPLORER_CHANNELS;
-
     if (!txId) return res.status(400).json({ error: 'txId required' });
 
     const found = await findTxTimestamp(txId, channels);
     if (!found) return res.status(404).json({ error: 'timestamp not found', txId, channels });
 
-    res.json({ txId, ...found });
+    res.json({ txId, channel: found.channel, block: found.block, timestamp: found.timestamp });
   } catch (e) {
     res.status(400).json({ error: e?.message || String(e) });
   }
@@ -561,7 +647,6 @@ app.post('/quote', async (req, res) => {
     res.status(400).json({ error: e?.message || String(e) });
   }
 });
-
 app.post('/swap', async (req, res) => {
   if (!PRIVATE_KEY) return res.status(400).json({ error: 'PRIVATE_KEY not set; /swap disabled' });
   const { tokenIn, tokenOut, fee, exactIn, amountOutMinimum, wallet } = req.body || {};
@@ -584,10 +669,10 @@ app.post('/swap', async (req, res) => {
       try {
         const found = await findTxTimestamp(done.txId);
         if (found?.timestamp) txTs = found.timestamp;
-      } catch {/* ignore */}
+      } catch { /* ignore */ }
     }
 
-    // Snapshot balances and log with timestamp (fallback to now if none)
+    // After the swap settles, capture a balances snapshot for the log
     try {
       const after = await fetchCoreBalances();
       pushTx(after, { txId: done.txId, hash: done.transactionHash }, txTs);
