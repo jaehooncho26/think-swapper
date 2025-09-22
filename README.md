@@ -1,4 +1,4 @@
-the think swapper
+THE think SWAPPER
 
 A trading bot on Galaswap. The web page shows wallet balances, prices, and recent swaps and has a bot that follows certain algorithms to make trades every hour. Backed by a Netlify Function that talks to GalaChain / GalaSwap.
 
