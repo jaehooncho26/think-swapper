@@ -1,0 +1,1 @@
+{"version":3,"file":"PresignedClient.js","sourceRoot":"","sources":["../../../src/customClients/PresignedClient.ts"],"names":[],"mappings":";AAAA,sDAAsD;;;AAEtD;;;;;;;;;;;;;GAaG;AACH,wDAAiF;AAEjF;;GAEG;AAEH,MAAa,eAAgB,SAAQ,mCAAiB;IACpD,YAAY,OAAkC;QAC5C,KAAK,CAAC,OAAO,CAAC,CAAC;IACjB,CAAC;IAEM,KAAK,CAAC,IAAI,CAAmB,OAAe,EAAE,OAAmD;QACtG,OAAO,OAAO,CAAC;IACjB,CAAC;CACF;AARD,0CAQC"}

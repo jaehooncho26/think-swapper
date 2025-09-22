@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>the think swapper</title>
+  <style>
+    @font-face {
+      font-family: 'Qahiri';
+      src: url('Qahiri-Regular.ttf') format('truetype');
+      font-weight: lighter;
+      font-style: normal;
+    } 
+    :root { --bg:#000000; --card:#f59e47; --muted:##f59e47; --text:#e8edff; }
+    body {
+      margin:0;
+      font-family:'Qahiri',system-ui,-apple-system,Segoe UI,Roboto,Arial;
+      background-image: url("background.jpg"); /* replace with your file or URL */
+      background-size: cover;       /* make it fill the screen */
+      background-position: center;  /* keep it centered */
+      background-repeat: no-repeat; /* don’t tile */
+      color: var(--text);
+    }
+    .wrap { max-width:880px; margin:32px auto; padding:0 16px; }
+    .card { background:#000000; border:0px solid #f59e47; border-radius:16px; padding:16px; box-shadow:0 6px 24px rgba(0,0,0,.25); }
+    .grid { display:grid; gap:12px; }
+    .g3 { grid-template-columns:repeat(3,1fr); }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .title-container { display:flex; justify-content:center; align-items:center; margin-top:50px; margin-bottom:75px; }
+    .description-container { display:flex; justify-content:center; align-items:center; margin-top:20px; margin-bottom:20px; }    
+    .title-img { width:100%; max-width:500px; height:auto; object-fit:contain; }
+    .description-img { width:100%; max-width:250px; height:auto; object-fit:contain; }
+    .description2-img { width:100%; max-width:125px; height:auto; object-fit:contain; }
+    .muted { color:#FFFFFF; font-weight:bold; font-size:40px;}
+    .pill { display:inline-block; padding:5px 30px; border:2px solid #9c6025; border-radius:999px; font-family:monospace; background:#edba87; color:#000000;}
+    .right { text-align:right; }
+    .text-value-pair { display:flex; gap:8px; justify-content:center; align-items:center; }
+    .text-descriptions { display:flex; gap:8px; margin-top:100px; margin-bottom:80px; margin-left:200px; margin-right:200px; justify-content:center; align-items:center; }
+    .text-titles { display:flex; gap:8px; margin-top:50px; margin-bottom:20px; margin-left:200px; margin-right:200px; justify-content:center; align-items:center; }
+
+    /* Logo + Label styling */
+    .token-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .token-label img {
+      height: 40px; /* match .muted font size */
+      width: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="title-container">
+    <img src="thinkswapper.png" alt="GalaSwap Logo" class="title-img">
+  </div>
+  <div class="description-container">
+    <img src="price.png" alt="Price section" class="description-img">
+  </div>
+
+  <div class="wrap">
+    <!-- Prices -->
+    <div class="grid g3" style="margin-top:14px;">
+      <div class="card">
+        <div class="text-value-pair">
+          <div class="token-label">
+            <img src="usdclogo.png" alt="USDC logo">
+            <div class="muted">USDC:</div>
+          </div>
+          <div id="pUSDC" class="pill">—</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="text-value-pair">
+          <div class="token-label">
+            <img src="galalogo.png" alt="GALA logo">
+            <div class="muted">GALA:</div>
+          </div>
+          <div id="pGALA" class="pill">—</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="text-value-pair">
+          <div class="token-label">
+            <img src="ethlogo.png" alt="ETH logo">
+            <div class="muted">ETH:</div>
+          </div>
+          <div id="pETH" class="pill">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="description-container">
+      <img src="thinkerswallet.png" alt="Wallet section" class="description2-img">
+    </div>
+
+    <!-- Balances -->
+    <div class="grid g3" style="margin-top:14px;">
+      <div class="card">
+        <div class="text-value-pair">
+          <div class="token-label">
+            <img src="usdclogo.png" alt="USDC logo">
+            <div class="muted">USDC:</div>
+          </div>
+          <div id="bUSDC" class="pill">N/A</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="text-value-pair">
+          <div class="token-label">
+            <img src="galalogo.png" alt="GALA logo">
+            <div class="muted">GALA:</div>
+          </div>
+          <div id="bGALA" class="pill">N/A</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="text-value-pair">
+          <div class="token-label">
+            <img src="ethlogo.png" alt="ETH logo">
+            <div class="muted">ETH:</div>
+          </div>
+          <div id="bETH" class="pill">N/A</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Wallet Total -->
+    <div class="card" style="margin-top:14px;">
+      <div class="row" style="justify-content:center;">
+        <div class="text-value-pair">
+          <div class="muted">Total:</div>
+          <div id="bTOTAL" class="pill">N/A</div>
+        </div>
+      </div>
+    </div>
+    <h1 class="text-descriptions"></h1>
+  </div>
+
+  <script>
+    const API_BASE = 'http://localhost:8787';
+    const $ = id => document.getElementById(id);
+    const pGALA=$('pGALA'), pUSDC=$('pUSDC'), pETH=$('pETH');
+    const bUSDC=$('bUSDC'), bGALA=$('bGALA'), bETH=$('bETH'), bTOTAL=$('bTOTAL');
+    const msg = $('msg');
+    const fmtUSD = (n) => {
+      if (n == null || !isFinite(n)) return '—';
+      return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+    };
+    const toNum = (v) => {
+      const n = Number(v);
+      return isFinite(n) ? n : 0;
+    };
+    let latestPrices = { GALA: null, ETH: null, USDC: 1 };
+    let lastBalances = { GUSDC: null, GALA: null, GWETH: null };
+    async function fetchPrices() {
+      const r = await fetch(`${API_BASE}/prices`);
+      if (!r.ok) throw new Error('prices ' + r.status);
+      const j = await r.json();
+      const P = j.prices || {};
+      latestPrices = {
+        GALA: toNum(P.GALA),
+        ETH:  toNum(P.ETH),
+        USDC: toNum(P.USDC) || 1
+      };
+      pGALA.textContent = fmtUSD(latestPrices.GALA);
+      pUSDC.textContent = fmtUSD(latestPrices.USDC);
+      pETH .textContent = fmtUSD(latestPrices.ETH);
+    }
+    async function fetchBalances() {
+      const r = await fetch(`${API_BASE}/assets`);
+      if (!r.ok) {
+        bUSDC.textContent = 'N/A';
+        bGALA.textContent = 'N/A';
+        bETH .textContent = 'N/A';
+        bTOTAL.textContent = 'N/A';
+        throw new Error('assets ' + r.status);
+      }
+      const j = await r.json();
+      const arr = Array.isArray(j.tokens) ? j.tokens : [];
+      const map = new Map(arr.map(t => [t.symbol, String(t.quantity)]));
+      const qUSDC = map.get('GUSDC');
+      const qGALA = map.get('GALA');
+      const qWETH = map.get('GWETH');
+      bUSDC.textContent = qUSDC ?? 'N/A';
+      bGALA.textContent = qGALA ?? 'N/A';
+      bETH .textContent = qWETH ?? 'N/A';
+      lastBalances = {
+        GUSDC: qUSDC != null ? toNum(qUSDC) : null,
+        GALA:  qGALA != null ? toNum(qGALA)  : null,
+        GWETH: qWETH != null ? toNum(qWETH) : null
+      };
+      if (lastBalances.GUSDC == null && lastBalances.GALA == null && lastBalances.GWETH == null) {
+        bTOTAL.textContent = 'N/A';
+      } else {
+        const total =
+          (lastBalances.GUSDC ?? 0) +
+          (lastBalances.GALA  ?? 0) * (latestPrices.GALA || 0) +
+          (lastBalances.GWETH ?? 0) * (latestPrices.ETH  || 0);
+        bTOTAL.textContent = isNaN(total) ? 'N/A' : fmtUSD(total);
+      }
+    }
+    async function refreshAll() {
+      try {
+        await fetchPrices();
+        await fetchBalances();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    setInterval(() => fetchPrices().catch(()=>{}), 5000);
+    setInterval(() => fetchBalances().catch(()=>{}), 10000);
+    refreshAll();
+  </script>
+</body>
+</html>
