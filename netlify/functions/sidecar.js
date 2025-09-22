@@ -1,11 +1,12 @@
-// sidecar.js — CommonJS server that powers your frontend
-// Run: node sidecar.js
+// netlify/functions/sidecar.js
+// Serverless version for Netlify Functions (path: /.netlify/functions/sidecar/*)
 
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 require('dotenv').config();
 const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
+const serverless = require('serverless-http');
 
 // ---------------------- Helpers ----------------------
 function splitEthBar(w) {
@@ -38,7 +39,7 @@ function maskPK(pk) {
 }
 
 // ---------------------- Env ----------------------
-const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8787; // unused in serverless, kept for parity
 const RAW_WALLET = process.env.WALLET_ADDRESS || '';
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
 
@@ -314,11 +315,5 @@ app.post('/swap', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Sidecar running at http://localhost:${PORT}`);
-  console.log(`🔎 Wallet:        ${WALLET || '(none)'} ${WALLET && validEthNamespaceNo0x(WALLET) ? '(valid)' : '(INVALID)'}`);
-  console.log(`🌐 Gateway:       ${GATEWAY_BASE_URL}`);
-  console.log(`🌐 DexBackend:    ${DEX_BACKEND_BASE_URL}`);
-  console.log(`🌐 Bundler:       ${BUNDLER_BASE_URL}`);
-  if (PRIVATE_KEY) console.log(`🔐 Signer:        present (${maskPK(PRIVATE_KEY)})`);
-});
+// ---------------------- Serverless export (NO app.listen) ----------------------
+module.exports.handler = serverless(app);
