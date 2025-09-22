@@ -4,8 +4,8 @@
 
 [functions]
   directory = "netlify/functions"
-  included_files = ["hybrid-bot.js"]
+  included_files = ["bot.js"] # bundle your script with the function
   node_bundler = "esbuild"
 
-[functions."run-hybrid-bot"]
-  schedule = "*/30 * * * *"  # every 30 minutes (UTC)
+[functions."one-cent-gala-to-usdc"]
+  schedule = "*/10 * * * *"   # every 10 minutes (UTC)
