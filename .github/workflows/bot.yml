@@ -1,15 +1,15 @@
-name: GalaDEX Bot
+name: GalaDEX Bot (Debug)
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'   # every 15 minutes (UTC)
   workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
 
 permissions:
   contents: read
 
 jobs:
-  run-bot:
+  probe:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -22,33 +22,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
-      - name: Install deps
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm i
-          fi
-
-      - name: Env sanity
-        env:
-          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
-          PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}
-          DRY_RUN:        "true"      # set "false" when ready to trade
-          BOT_USD_CENTS:  "1"
-          SLIPPAGE_BPS:   "200"
+      - name: Env sanity (no secrets leaked)
         run: |
           echo "DRY_RUN=${DRY_RUN}"
           echo "WALLET_ADDRESS prefix: ${WALLET_ADDRESS:0:10}..."
           test -n "$PRIVATE_KEY" && echo "PRIVATE_KEY present: yes" || echo "PRIVATE_KEY present: no"
-
-      - name: Run bot once
         env:
           WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
           PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}
-          DRY_RUN:        "true"      # flip to "false" to trade live
-          BOT_USD_CENTS:  "1"
-          SLIPPAGE_BPS:   "200"
-        run: node bot.js once
+          DRY_RUN:        "true"
+
+      - name: Install deps
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm i @gala-chain/gswap-sdk
+
+      - name: Quick quote test (1 GALA -> GUSDC, no signing)
+        env:
+          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
+        run: |
+          node -e "const {GSwap,PrivateKeySigner}=require('@gala-chain/gswap-sdk');
+          (async()=>{
+            const g=new GSwap({signer:new PrivateKeySigner('0x'),walletAddress:process.env.WALLET_ADDRESS});
+            const GALA='GALA|Unit|none|none', GUSDC='GUSDC|Unit|none|none';
+            const q=await g.quoting.quoteExactInput(GALA,GUSDC,'1');
+            console.log('OK quote:', {feeTier:q.feeTier, out:q.outTokenAmount});
+          })().catch(e=>{console.error('Quote failed:', e?.message||e); process.exit(1);});"
