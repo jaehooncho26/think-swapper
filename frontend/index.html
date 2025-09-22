@@ -159,24 +159,43 @@
     const pGALA=$('pGALA'), pUSDC=$('pUSDC'), pETH=$('pETH');
     const bUSDC=$('bUSDC'), bGALA=$('bGALA'), bETH=$('bETH'), bTOTAL=$('bTOTAL');
     const txList=$('txList'), txNote=$('txNote');
-
+  
+    // ---------- formatting helpers ----------
     const fmtUSD = (n) => {
       if (n == null || !isFinite(n)) return '—';
       return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     };
     const toNum = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
-    const fmtTime = (t) => {
-      const ms = String(t).length <= 10 ? Number(t) * 1000 : Number(t);
+  
+    // Parse seconds/ms/ISO → epoch ms
+    function parseTsAny(t) {
+      if (t == null) return null;
+      if (typeof t === 'number') return t < 2e10 ? Math.round(t*1000) : Math.round(t);
+      if (typeof t === 'string') {
+        const n = Number(t);
+        if (Number.isFinite(n)) return n < 2e10 ? Math.round(n*1000) : Math.round(n);
+        const ms = Date.parse(t); // ISO
+        if (Number.isFinite(ms)) return ms;
+      }
+      return null;
+    }
+  
+    function fmtTime(anyTs) {
+      const ms = parseTsAny(anyTs);
+      if (!ms) return '—';
       const d = new Date(ms);
-      return isNaN(d.getTime()) ? '—' : d.toLocaleString(undefined, {
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleString(undefined, {
         year:'numeric', month:'short', day:'2-digit',
-        hour:'2-digit', minute:'2-digit', second:'2-digit'
+        hour:'2-digit', minute:'2-digit', second:'2-digit',
+        timeZoneName:'short'
       });
-    };
-
+    }
+  
     let latestPrices = { GALA: null, ETH: null, USDC: 1 };
     let lastBalances = { GUSDC: null, GALA: null, GWETH: null };
-
+    let lastTxsData = []; // keep last fetched list so we can re-render after timestamp lookups
+  
     async function fetchPrices() {
       const r = await fetch(`${API_BASE}/prices`);
       if (!r.ok) throw new Error('prices ' + r.status);
@@ -191,7 +210,7 @@
       pUSDC.textContent = fmtUSD(latestPrices.USDC);
       pETH .textContent = fmtUSD(latestPrices.ETH);
     }
-
+  
     async function fetchBalances() {
       const r = await fetch(`${API_BASE}/assets`);
       if (!r.ok) {
@@ -225,25 +244,39 @@
         bTOTAL.textContent = isNaN(total) ? 'N/A' : fmtUSD(total);
       }
     }
-
-    // --- Transactions UI ---
+  
+    // ---------- Transactions UI ----------
     function renderTxs(txs, note='') {
       if (!Array.isArray(txs) || txs.length === 0) {
         txList.innerHTML = '<div class="tx-empty">No transactions yet.</div>';
         txNote.textContent = note || '';
+        lastTxsData = [];
         return;
       }
+      lastTxsData = txs.slice(); // copy for future re-render
+  
       // newest first
-      txs.sort((a,b) => Number(b.ts||b.time||b.timestamp||0) - Number(a.ts||a.time||a.timestamp||0));
-      txList.innerHTML = txs.map(tx => {
-        const ts = tx.ts ?? tx.time ?? tx.timestamp ?? Date.now();
+      const sorted = txs.slice().sort((a,b) => {
+        const ta = parseTsAny(a.ts ?? a.time ?? a.timestamp ?? a.meta?.timestamp) || 0;
+        const tb = parseTsAny(b.ts ?? b.time ?? b.timestamp ?? b.meta?.timestamp) || 0;
+        return tb - ta;
+      });
+  
+      txList.innerHTML = sorted.map(tx => {
+        const rawTs = tx.ts ?? tx.time ?? tx.timestamp ?? tx.meta?.timestamp;
+        const label = fmtTime(rawTs) || '—';
         const after = tx.after || {};
         const usdc = after.GUSDC ?? after.USDC ?? '—';
         const gala = after.GALA  ?? '—';
         const weth = after.GWETH ?? after.WETH ?? '—';
+        const id   = tx.meta?.txId || tx.meta?.hash || '';
+  
+        // title attr shows ISO for precision if we parsed a date
+        const ms = parseTsAny(rawTs);
+        const iso = ms ? new Date(ms).toISOString() : '';
         return `
-          <div class="tx-row">
-            <div class="tx-time">${fmtTime(ts)}</div>
+          <div class="tx-row" title="${iso ? `ISO: ${iso}` : ''}">
+            <div class="tx-time">${label}${id ? ` — <span style="opacity:.7">(${id.slice(0,6)}…${id.slice(-6)})</span>` : ''}</div>
             <div class="tx-pills">
               <span class="pill">USDC: ${usdc}</span>
               <span class="pill">GALA: ${gala}</span>
@@ -252,10 +285,41 @@
           </div>
         `;
       }).join('');
+  
       txNote.textContent = note || '';
     }
-
-    // If /txs is empty, fall back to a single snapshot row from /assets
+  
+    // If some rows lack a valid timestamp but have a txId/hash, ask the sidecar to resolve it.
+    async function fillMissingTimestamps(txs) {
+      const needs = (txs || []).filter(tx => {
+        const raw = tx.ts ?? tx.time ?? tx.timestamp ?? tx.meta?.timestamp;
+        const hasTime = !!parseTsAny(raw);
+        const hasId = !!(tx.meta?.txId || tx.meta?.hash);
+        return !hasTime && hasId;
+      });
+  
+      if (needs.length === 0) return;
+  
+      // Resolve in parallel (cap to a small number to be gentle)
+      const slice = needs.slice(0, 5);
+      await Promise.all(slice.map(async (tx) => {
+        const id = tx.meta?.txId || tx.meta?.hash;
+        try {
+          const r = await fetch(`${API_BASE}/tx-time?txId=${encodeURIComponent(id)}`);
+          if (!r.ok) return;
+          const j = await r.json();
+          if (j && j.timestamp) {
+            tx.ts = j.timestamp;        // update in place
+            tx.meta = { ...(tx.meta||{}), resolvedChannel: j.channel, block: j.block };
+          }
+        } catch {}
+      }));
+  
+      // Re-render with improved timestamps
+      renderTxs(lastTxsData);
+    }
+  
+    // Fallback: show one snapshot if /txs empty
     async function fallbackSnapshot() {
       try {
         const r = await fetch(`${API_BASE}/assets`);
@@ -277,7 +341,7 @@
         renderTxs([], 'No transactions yet.');
       }
     }
-
+  
     async function fetchTxs() {
       try {
         const r = await fetch(`${API_BASE}/txs?limit=50`);
@@ -285,17 +349,18 @@
         const j = await r.json();
         const list = Array.isArray(j.txs) ? j.txs : [];
         if (list.length === 0) {
-          // fallback to snapshot so you always see at least one row
           await fallbackSnapshot();
         } else {
           renderTxs(list);
+          // resolve missing times (e.g., older seeded rows or SDK objects without timestamps)
+          fillMissingTimestamps(list);
         }
       } catch (e) {
         console.error(e);
         await fallbackSnapshot();
       }
     }
-
+  
     async function refreshAll() {
       try {
         await fetchPrices();
@@ -305,11 +370,12 @@
         console.error(e);
       }
     }
-
+  
     setInterval(() => fetchPrices().catch(()=>{}), 5000);
     setInterval(() => fetchBalances().catch(()=>{}), 10000);
     setInterval(() => fetchTxs().catch(()=>{}), 15000);
     refreshAll();
   </script>
+  
 </body>
 </html>
