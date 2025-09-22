@@ -155,18 +155,20 @@
 
   <script>
     const API_BASE = '/.netlify/functions/sidecar';
+    const DISPLAY_TZ = 'America/Los_Angeles'; // force Pacific time
+
     const $ = id => document.getElementById(id);
     const pGALA=$('pGALA'), pUSDC=$('pUSDC'), pETH=$('pETH');
     const bUSDC=$('bUSDC'), bGALA=$('bGALA'), bETH=$('bETH'), bTOTAL=$('bTOTAL');
     const txList=$('txList'), txNote=$('txNote');
-  
+
     // ---------- formatting helpers ----------
     const fmtUSD = (n) => {
       if (n == null || !isFinite(n)) return '—';
       return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     };
     const toNum = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
-  
+
     // Parse seconds/ms/ISO → epoch ms
     function parseTsAny(t) {
       if (t == null) return null;
@@ -179,7 +181,7 @@
       }
       return null;
     }
-  
+
     function fmtTime(anyTs) {
       const ms = parseTsAny(anyTs);
       if (!ms) return '—';
@@ -188,14 +190,15 @@
       return d.toLocaleString(undefined, {
         year:'numeric', month:'short', day:'2-digit',
         hour:'2-digit', minute:'2-digit', second:'2-digit',
+        timeZone: DISPLAY_TZ,
         timeZoneName:'short'
       });
     }
-  
+
     let latestPrices = { GALA: null, ETH: null, USDC: 1 };
     let lastBalances = { GUSDC: null, GALA: null, GWETH: null };
-    let lastTxsData = []; // keep last fetched list so we can re-render after timestamp lookups
-  
+    let lastTxsData = [];
+
     async function fetchPrices() {
       const r = await fetch(`${API_BASE}/prices`);
       if (!r.ok) throw new Error('prices ' + r.status);
@@ -210,7 +213,7 @@
       pUSDC.textContent = fmtUSD(latestPrices.USDC);
       pETH .textContent = fmtUSD(latestPrices.ETH);
     }
-  
+
     async function fetchBalances() {
       const r = await fetch(`${API_BASE}/assets`);
       if (!r.ok) {
@@ -244,7 +247,7 @@
         bTOTAL.textContent = isNaN(total) ? 'N/A' : fmtUSD(total);
       }
     }
-  
+
     // ---------- Transactions UI ----------
     function renderTxs(txs, note='') {
       if (!Array.isArray(txs) || txs.length === 0) {
@@ -253,42 +256,49 @@
         lastTxsData = [];
         return;
       }
-      lastTxsData = txs.slice(); // copy for future re-render
-  
-      // newest first
+      lastTxsData = txs.slice();
+
       const sorted = txs.slice().sort((a,b) => {
         const ta = parseTsAny(a.ts ?? a.time ?? a.timestamp ?? a.meta?.timestamp) || 0;
         const tb = parseTsAny(b.ts ?? b.time ?? b.timestamp ?? b.meta?.timestamp) || 0;
         return tb - ta;
       });
-  
+
       txList.innerHTML = sorted.map(tx => {
         const rawTs = tx.ts ?? tx.time ?? tx.timestamp ?? tx.meta?.timestamp;
         const label = fmtTime(rawTs) || '—';
         const after = tx.after || {};
-        const usdc = after.GUSDC ?? after.USDC ?? '—';
-        const gala = after.GALA  ?? '—';
-        const weth = after.GWETH ?? after.WETH ?? '—';
-        const id   = tx.meta?.txId || tx.meta?.hash || '';
-  
-        // title attr shows ISO for precision if we parsed a date
+        const usdcStr = after.GUSDC ?? after.USDC ?? '0';
+        const galaStr = after.GALA  ?? '0';
+        const wethStr = after.GWETH ?? after.WETH ?? '0';
+        const usdc = toNum(usdcStr), gala = toNum(galaStr), weth = toNum(wethStr);
+
+        // Prefer historical total from sidecar; otherwise show ≈ using current prices
+        const hasHist = tx.usdTotalAt != null && isFinite(Number(tx.usdTotalAt));
+        const histTotal = hasHist ? Number(tx.usdTotalAt) : null;
+        const approxNow = (usdc) + (gala * (latestPrices.GALA || 0)) + (weth * (latestPrices.ETH || 0));
+        const totalLabel = hasHist ? fmtUSD(histTotal) : ('≈' + fmtUSD(approxNow));
+
+        const id = tx.meta?.txId || tx.meta?.hash || '';
         const ms = parseTsAny(rawTs);
         const iso = ms ? new Date(ms).toISOString() : '';
+
         return `
           <div class="tx-row" title="${iso ? `ISO: ${iso}` : ''}">
             <div class="tx-time">${label}${id ? ` — <span style="opacity:.7">(${id.slice(0,6)}…${id.slice(-6)})</span>` : ''}</div>
             <div class="tx-pills">
-              <span class="pill">USDC: ${usdc}</span>
-              <span class="pill">GALA: ${gala}</span>
-              <span class="pill">ETH: ${weth}</span>
+              <span class="pill">USDC: ${usdcStr}</span>
+              <span class="pill">GALA: ${galaStr}</span>
+              <span class="pill">ETH: ${wethStr}</span>
+              <span class="pill">Total @ time: ${totalLabel}</span>
             </div>
           </div>
         `;
       }).join('');
-  
-      txNote.textContent = note || '';
+
+      txNote.textContent = note || ( 'Totals use historical prices when available; otherwise an approximate current-price total (shown with “≈”). Times shown in ' + DISPLAY_TZ + '.' );
     }
-  
+
     // If some rows lack a valid timestamp but have a txId/hash, ask the sidecar to resolve it.
     async function fillMissingTimestamps(txs) {
       const needs = (txs || []).filter(tx => {
@@ -297,10 +307,8 @@
         const hasId = !!(tx.meta?.txId || tx.meta?.hash);
         return !hasTime && hasId;
       });
-  
       if (needs.length === 0) return;
-  
-      // Resolve in parallel (cap to a small number to be gentle)
+
       const slice = needs.slice(0, 5);
       await Promise.all(slice.map(async (tx) => {
         const id = tx.meta?.txId || tx.meta?.hash;
@@ -309,17 +317,16 @@
           if (!r.ok) return;
           const j = await r.json();
           if (j && j.timestamp) {
-            tx.ts = j.timestamp;        // update in place
+            tx.ts = j.timestamp;
             tx.meta = { ...(tx.meta||{}), resolvedChannel: j.channel, block: j.block };
           }
         } catch {}
       }));
-  
-      // Re-render with improved timestamps
+
       renderTxs(lastTxsData);
     }
-  
-    // Fallback: show one snapshot if /txs empty
+
+    // Fallback: one snapshot if /txs is empty
     async function fallbackSnapshot() {
       try {
         const r = await fetch(`${API_BASE}/assets`);
@@ -341,10 +348,15 @@
         renderTxs([], 'No transactions yet.');
       }
     }
-  
+
     async function fetchTxs() {
+      // try enriched endpoint first
       try {
-        const r = await fetch(`${API_BASE}/txs?limit=50`);
+        let r = await fetch(`${API_BASE}/txs/usd?limit=50`);
+        if (!r.ok) {
+          // fall back to plain txs
+          r = await fetch(`${API_BASE}/txs?limit=50`);
+        }
         if (!r.ok) throw new Error('txs ' + r.status);
         const j = await r.json();
         const list = Array.isArray(j.txs) ? j.txs : [];
@@ -352,7 +364,6 @@
           await fallbackSnapshot();
         } else {
           renderTxs(list);
-          // resolve missing times (e.g., older seeded rows or SDK objects without timestamps)
           fillMissingTimestamps(list);
         }
       } catch (e) {
@@ -360,7 +371,7 @@
         await fallbackSnapshot();
       }
     }
-  
+
     async function refreshAll() {
       try {
         await fetchPrices();
@@ -370,12 +381,12 @@
         console.error(e);
       }
     }
-  
+
     setInterval(() => fetchPrices().catch(()=>{}), 5000);
     setInterval(() => fetchBalances().catch(()=>{}), 10000);
     setInterval(() => fetchTxs().catch(()=>{}), 15000);
     refreshAll();
   </script>
-  
+
 </body>
 </html>

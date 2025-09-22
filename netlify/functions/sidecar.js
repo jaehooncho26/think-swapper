@@ -84,6 +84,8 @@ const EXPLORER_CHANNELS    = (process.env.EXPLORER_CHANNELS   || 'asset,dex')
   .split(',').map(s => s.trim()).filter(Boolean);
 const EXPLORER_LOOKBACK    = Math.max(1, Number(process.env.EXPLORER_LOOKBACK || 1500));
 
+const COINGECKO_BASE       = process.env.COINGECKO_BASE        || 'https://api.coingecko.com/api/v3';
+
 const WALLET = normalizeWalletNo0x(RAW_WALLET);
 if (!WALLET) {
   console.warn('⚠️ WALLET_ADDRESS missing or malformed. Expected eth|<40-hex> (no 0x).');
@@ -126,7 +128,7 @@ const CLASS = {
   GWETH: 'GWETH|Unit|none|none',
 };
 
-// ---------------------- Prices ----------------------
+// ---------------------- Prices (spot via quoting) ----------------------
 async function priceInUSDC(symbol) {
   if (symbol === 'USDC') return '1';
   if (symbol === 'GALA') {
@@ -241,7 +243,6 @@ function txMatches(obj, txId) {
 }
 
 function pickTxTimestamp(hit, blk) {
-  // prefer tx timestamp, then block
   const ms = normEpochMs(hit?.timestamp || hit?.time || hit?.date) || normEpochMs(blk?.timestamp || blk?.time || blk?.date);
   return ms || 0;
 }
@@ -289,6 +290,44 @@ async function findTxTimestamp(txId, channels) {
     }
   }
   return null;
+}
+
+// ---------------------- Historical pricing (Coingecko) ----------------------
+const CG_IDS = { GALA: 'gala', ETH: 'ethereum', GWETH: 'ethereum' };
+const priceCache = new Map(); // key = `cg:<id>:<hourBucket>` -> number
+
+async function coingeckoPriceAtMs(id, tMs) {
+  const bucket = Math.floor(tMs / (60 * 60 * 1000)); // 1h buckets
+  const key = `cg:${id}:${bucket}`;
+  if (priceCache.has(key)) return priceCache.get(key);
+
+  const from = Math.floor((tMs - 60 * 60 * 1000) / 1000); // t-1h
+  const to   = Math.floor((tMs + 60 * 60 * 1000) / 1000); // t+1h
+  const url  = `${COINGECKO_BASE}/coins/${encodeURIComponent(id)}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`;
+
+  const j = await tryFetch(url);
+  const arr = Array.isArray(j?.prices) ? j.prices : [];
+  let best = null, bestDt = 1e15;
+  for (const row of arr) {
+    const t = Number(row[0]);
+    const p = Number(row[1]);
+    const dt = Math.abs(t - tMs);
+    if (Number.isFinite(t) && Number.isFinite(p) && dt < bestDt) {
+      bestDt = dt; best = p;
+    }
+  }
+  if (!Number.isFinite(best)) throw new Error('No historical price data');
+  priceCache.set(key, best);
+  if (priceCache.size > 500) priceCache.delete(priceCache.keys().next().value);
+  return best;
+}
+
+async function historicalUSD(symbol, tMs) {
+  const s = String(symbol).toUpperCase();
+  if (s === 'USDC' || s === 'GUSDC') return 1;
+  if (s === 'GALA') return coingeckoPriceAtMs(CG_IDS.GALA, tMs);
+  if (s === 'ETH' || s === 'GWETH') return coingeckoPriceAtMs(CG_IDS.ETH, tMs);
+  throw new Error(`Unsupported symbol for historical price: ${symbol}`);
 }
 
 // ---------------------- Simple in-memory TX log ----------------------
@@ -389,7 +428,7 @@ app.get('/assets', async (req, res) => {
   }
 });
 
-// ---------------------- Transactions ----------------------
+// ---------------------- Transactions (raw) ----------------------
 app.get('/txs', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 50));
@@ -407,7 +446,80 @@ app.get('/txs', async (req, res) => {
   }
 });
 
-// Look up a transaction's timestamp via explorer
+// ---------------------- Transactions (with historical USD total) ----------------------
+app.get('/txs/usd', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+    const resolveTimes = (req.query.resolve ?? '1') !== '0'; // attempt explorer lookup
+
+    if (TX_LOG.length === 0) {
+      try {
+        const after = await fetchCoreBalances();
+        pushTx(after, { seeded: true });
+      } catch {}
+    }
+
+    // Copy newest-first slice
+    const list = TX_LOG.slice(-limit).reverse().map(x => ({ ...x, after: { ...x.after }, meta: { ...(x.meta||{}) } }));
+
+    // Resolve timestamps if missing but txId/hash present
+    if (resolveTimes) {
+      for (const tx of list) {
+        const raw = tx.ts || tx.meta?.timestamp;
+        if (!normEpochMs(raw)) {
+          const id = tx.meta?.txId || tx.meta?.hash;
+          if (id) {
+            try {
+              const found = await findTxTimestamp(id);
+              if (found?.timestamp) {
+                tx.ts = found.timestamp;
+                tx.meta.resolvedChannel = found.channel;
+                tx.meta.block = found.block;
+              }
+            } catch {}
+          }
+        }
+      }
+    }
+
+    // Compute historical totals (Coingecko)
+    for (const tx of list) {
+      const tMs = normEpochMs(tx.ts || tx.meta?.timestamp) || Date.now();
+      const usdc = Number(tx.after?.GUSDC ?? tx.after?.USDC ?? '0') || 0;
+      const galaQ = Number(tx.after?.GALA ?? '0') || 0;
+      const wethQ = Number(tx.after?.GWETH ?? tx.after?.WETH ?? '0') || 0;
+
+      // Fetch historical prices (errors fall back to current quotes)
+      let pGala = null, pEth = null;
+      try { pGala = await historicalUSD('GALA', tMs); } catch {}
+      try { pEth  = await historicalUSD('ETH',  tMs); } catch {}
+
+      if (!Number.isFinite(pGala) || !Number.isFinite(pEth)) {
+        // fallback to spot quotes if Coingecko not available
+        const [spotGala, spotEth] = await Promise.all([
+          priceInUSDC('GALA').then(Number).catch(() => 0),
+          priceInUSDC('ETH').then(Number).catch(() => 0),
+        ]);
+        if (!Number.isFinite(pGala)) pGala = spotGala || 0;
+        if (!Number.isFinite(pEth))  pEth  = spotEth  || 0;
+      }
+
+      const total = usdc + galaQ * pGala + wethQ * pEth;
+      tx.usdTotalAt = Number.isFinite(total) ? Number(total.toFixed(8)) : null;
+
+      // (Optional) include the prices used when debug=1
+      if ((req.query.debug || '') === '1') {
+        tx.pricesAt = { GALA: pGala, ETH: pEth, USDC: 1, ts: tMs };
+      }
+    }
+
+    res.json({ wallet: WALLET || null, count: list.length, txs: list });
+  } catch (e) {
+    res.status(400).json({ error: e?.message || String(e) });
+  }
+});
+
+// ---------------------- TX timestamp lookup ----------------------
 app.get('/tx-time', async (req, res) => {
   try {
     const txId = String(req.query.txId || req.query.hash || '').trim();
@@ -420,6 +532,20 @@ app.get('/tx-time', async (req, res) => {
     if (!found) return res.status(404).json({ error: 'timestamp not found', txId, channels });
 
     res.json({ txId, ...found });
+  } catch (e) {
+    res.status(400).json({ error: e?.message || String(e) });
+  }
+});
+
+// ---------------------- Debug: single historical price ----------------------
+app.get('/price-at', async (req, res) => {
+  try {
+    const symbol = String(req.query.symbol || '').toUpperCase();
+    const ts = normEpochMs(req.query.ts);
+    if (!symbol) return res.status(400).json({ error: 'symbol required (GALA|ETH|USDC)' });
+    if (!ts) return res.status(400).json({ error: 'ts required (epoch seconds/ms or ISO string)' });
+    const p = await historicalUSD(symbol, ts);
+    res.json({ symbol, ts, price: p });
   } catch (e) {
     res.status(400).json({ error: e?.message || String(e) });
   }
