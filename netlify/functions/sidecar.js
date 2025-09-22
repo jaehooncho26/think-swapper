@@ -6,7 +6,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 require('dotenv').config();
 const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
-const serverless = require('serverless-http'); // <-- keep only this one
+const serverless = require('serverless-http');
 
 // ---------------------- Helpers ----------------------
 function splitEthBar(w) {
@@ -88,7 +88,7 @@ const CLASS = {
   GWETH: 'GWETH|Unit|none|none',
 };
 
-// ---------------------- Helpers (prices) ----------------------
+// ---------------------- Prices ----------------------
 async function priceInUSDC(symbol) {
   if (symbol === 'USDC') return '1';
   if (symbol === 'GALA') {
@@ -102,7 +102,14 @@ async function priceInUSDC(symbol) {
   throw new Error('Unsupported symbol');
 }
 
-// ---------------------- Assets Fallback ----------------------
+// ---------------------- Assets helpers ----------------------
+function normalizeTokensShape(j) {
+  if (Array.isArray(j?.tokens)) return { tokens: j.tokens, count: j.count ?? j.tokens.length };
+  if (Array.isArray(j?.items))  return { tokens: j.items,  count: j.items.length };
+  if (Array.isArray(j))         return { tokens: j,        count: j.length };
+  return { tokens: [], count: 0 };
+}
+
 function addrVariants(ownerNo0x) {
   const m = /^eth\|([a-f0-9]{40})$/.exec(String(ownerNo0x).toLowerCase());
   if (!m) return [];
@@ -123,13 +130,6 @@ async function tryFetch(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
-}
-
-function normalizeTokensShape(j) {
-  if (Array.isArray(j?.tokens)) return { tokens: j.tokens, count: j.count ?? j.tokens.length };
-  if (Array.isArray(j?.items))  return { tokens: j.items,  count: j.items.length };
-  if (Array.isArray(j))         return { tokens: j,        count: j.length };
-  return { tokens: [], count: 0 };
 }
 
 async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
@@ -177,6 +177,43 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
   return { ok: false, errors };
 }
 
+// Return the three core balances as strings
+async function fetchCoreBalances() {
+  // Try SDK first, then fall back to the smart fetcher
+  let data;
+  try {
+    data = await gswap.assets.getUserAssets(WALLET, 1, 100);
+  } catch {
+    const out = await fetchAssetsAny(WALLET, 1, 100);
+    data = out.ok ? out.norm : { tokens: [] };
+  }
+  const tokens = Array.isArray(data?.tokens) ? data.tokens : [];
+  const bySymbol = new Map(tokens.map(t => [String(t.symbol).toUpperCase(), String(t.quantity)]));
+
+  return {
+    GUSDC: bySymbol.get('GUSDC') ?? '0',
+    GALA:  bySymbol.get('GALA')  ?? '0',
+    GWETH: bySymbol.get('GWETH') ?? '0'
+  };
+}
+
+// ---------------------- Simple in-memory TX log ----------------------
+const TX_LOG = []; // newest appended at end; capped to 500 entries
+function pushTx(after, meta) {
+  const entry = {
+    ts: Date.now(),
+    after: {
+      GUSDC: String(after?.GUSDC ?? after?.USDC ?? '0'),
+      GALA:  String(after?.GALA  ?? '0'),
+      GWETH: String(after?.GWETH ?? after?.WETH ?? '0'),
+    },
+    meta: meta || {}
+  };
+  TX_LOG.push(entry);
+  if (TX_LOG.length > 500) TX_LOG.splice(0, TX_LOG.length - 500);
+  return entry;
+}
+
 // ---------------------- Routes ----------------------
 app.get('/', (_req, res) => res.json({
   ok: true,
@@ -221,23 +258,7 @@ app.get('/prices', async (_req, res) => {
   }
 });
 
-app.get('/assets/raw', async (_req, res) => {
-  try {
-    if (!WALLET) return res.status(400).json({ error: 'WALLET_ADDRESS not set or invalid' });
-
-    try {
-      const data = await gswap.assets.getUserAssets(WALLET, 1, 100);
-      return res.json({ walletTried: WALLET, raw: data, via: 'sdk' });
-    } catch (_e1) {
-      const out = await fetchAssetsAny(WALLET, 1, 100);
-      if (out.ok) return res.json({ walletTried: WALLET, raw: out.raw, via: out.via });
-      return res.status(404).json({ error: 'No assets route succeeded', attempts: out.errors });
-    }
-  } catch (e) {
-    res.status(400).json({ error: e?.message || String(e) });
-  }
-});
-
+// UI-friendly assets
 app.get('/assets', async (req, res) => {
   try {
     if (!WALLET) return res.status(400).json({ error: 'WALLET_ADDRESS not set or invalid' });
@@ -273,6 +294,28 @@ app.get('/assets', async (req, res) => {
   }
 });
 
+// ---------------------- Transactions ----------------------
+// Returns recent transactions recorded by this sidecar (newest first).
+// If there is no history yet, seeds one snapshot from current balances.
+app.get('/txs', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 50));
+    if (TX_LOG.length === 0) {
+      try {
+        const after = await fetchCoreBalances();
+        pushTx(after, { seeded: true });
+      } catch {
+        // ignore seed failure; return empty list
+      }
+    }
+    const out = TX_LOG.slice(-limit).reverse();
+    res.json({ wallet: WALLET || null, count: out.length, txs: out });
+  } catch (e) {
+    res.status(400).json({ error: e?.message || String(e) });
+  }
+});
+
+// ---------------------- Quote / Swap ----------------------
 app.post('/quote', async (req, res) => {
   const { tokenIn, tokenOut, amountIn, fee } = req.body || {};
   try {
@@ -298,6 +341,15 @@ app.post('/swap', async (req, res) => {
       chosenWallet
     );
     const done = await tx.wait();
+
+    // After the swap settles, capture a balances snapshot for the log
+    try {
+      const after = await fetchCoreBalances();
+      pushTx(after, { txId: done.txId, hash: done.transactionHash });
+    } catch (eSnap) {
+      console.warn('Swap completed but failed to snapshot balances:', String(eSnap?.message || eSnap));
+    }
+
     res.json({ txId: done.txId, hash: done.transactionHash });
   } catch (e) {
     res.status(400).json({ error: e?.message || String(e) });
