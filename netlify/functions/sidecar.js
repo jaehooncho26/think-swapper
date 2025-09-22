@@ -6,24 +6,23 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 require('dotenv').config();
 const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
-const serverless = require('serverless-http');
+const serverless = require('serverless-http'); // <-- keep only this one
 
 // ---------------------- Helpers ----------------------
 function splitEthBar(w) {
   if (!w) return { ok: false };
-  const s = String(w).trim().replace(/^"+|"+$/g, ''); // strip stray quotes
+  const s = String(w).trim().replace(/^"+|"+$/g, '');
   const [prefix, rest] = s.split('|');
   if (!prefix || !rest) return { ok: false };
   return { ok: true, prefix, rest };
 }
 
-// Normalize to GalaChain’s no-0x style: eth|<40-hex>
 function normalizeWalletNo0x(w) {
   const sp = splitEthBar(w);
   if (!sp.ok) return '';
   const prefix = String(sp.prefix).trim().toLowerCase();
-  let hex = String(sp.rest).trim().replace(/^0x/i, '').toLowerCase(); // strip 0x if present
-  hex = hex.slice(0, 40); // guard against extra chars
+  let hex = String(sp.rest).trim().replace(/^0x/i, '').toLowerCase();
+  hex = hex.slice(0, 40);
   if (!/^[a-f0-9]{40}$/.test(hex)) return '';
   return `${prefix}|${hex}`;
 }
@@ -39,16 +38,14 @@ function maskPK(pk) {
 }
 
 // ---------------------- Env ----------------------
-const PORT = process.env.PORT ? Number(process.env.PORT) : 8787; // unused in serverless, kept for parity
 const RAW_WALLET = process.env.WALLET_ADDRESS || '';
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
 
 const GATEWAY_BASE_URL     = process.env.GATEWAY_BASE_URL     || 'https://gateway-mainnet.galachain.com';
 const DEX_BACKEND_BASE_URL = process.env.DEX_BACKEND_BASE_URL || 'https://dex-backend-prod1.defi.gala.com';
 const BUNDLER_BASE_URL     = process.env.BUNDLER_BASE_URL     || 'https://bundle-backend-prod1.defi.gala.com';
-const GALACONNECT_BASE_URL = process.env.GALACONNECT_BASE_URL || 'https://api-galaswap.gala.com'; // read-only balances API
+const GALACONNECT_BASE_URL = process.env.GALACONNECT_BASE_URL || 'https://api-galaswap.gala.com';
 
-// ---------------------- Normalize wallet (no 0x) ----------------------
 const WALLET = normalizeWalletNo0x(RAW_WALLET);
 if (!WALLET) {
   console.warn('⚠️ WALLET_ADDRESS missing or malformed. Expected eth|<40-hex> (no 0x).');
@@ -61,21 +58,28 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ---------------------- Init SDK (single declaration) ----------------------
-const sdkOpts = { walletAddress: WALLET };
+// ✅ Strip Netlify function prefix so routes match
+app.use((req, _res, next) => {
+  const prefix = '/.netlify/functions/sidecar';
+  if (req.url.startsWith(prefix)) {
+    req.url = req.url.slice(prefix.length) || '/';
+  }
+  next();
+});
+
+// ---------------------- Init SDK ----------------------
+const sdkOpts = {
+  walletAddress: WALLET,
+  gatewayBaseUrl: GATEWAY_BASE_URL,
+  dexBackendBaseUrl: DEX_BACKEND_BASE_URL,
+  bundlerBaseUrl: BUNDLER_BASE_URL,
+  dexContractBasePath: '/api/asset/dexv3-contract',
+  tokenContractBasePath: '/api/asset/token-contract',
+  bundlingAPIBasePath: '/bundle',
+};
 if (PRIVATE_KEY) sdkOpts.signer = new PrivateKeySigner(PRIVATE_KEY);
 
-// Named URLs
-sdkOpts.gatewayBaseUrl     = GATEWAY_BASE_URL;
-sdkOpts.dexBackendBaseUrl  = DEX_BACKEND_BASE_URL;
-sdkOpts.bundlerBaseUrl     = BUNDLER_BASE_URL;
-
-// IMPORTANT: prod uses contract API prefixes; without these you’ll hit /user/assets at root -> 400
-sdkOpts.dexContractBasePath   = '/api/asset/dexv3-contract';
-sdkOpts.tokenContractBasePath = '/api/asset/token-contract';
-sdkOpts.bundlingAPIBasePath   = '/bundle';
-
-const gswap = new GSwap(sdkOpts); // <— exactly once
+const gswap = new GSwap(sdkOpts);
 
 // ---------------------- Token Class Keys ----------------------
 const CLASS = {
@@ -98,17 +102,17 @@ async function priceInUSDC(symbol) {
   throw new Error('Unsupported symbol');
 }
 
-// ---------------------- Assets Fallback (smart multi-host, multi-address) ----------------------
+// ---------------------- Assets Fallback ----------------------
 function addrVariants(ownerNo0x) {
   const m = /^eth\|([a-f0-9]{40})$/.exec(String(ownerNo0x).toLowerCase());
   if (!m) return [];
   const hex = m[1];
   return [
-    { key: 'address', value: `eth|${hex}` },        // eth|no0x
-    { key: 'address', value: `eth|0x${hex}` },      // eth|0x
-    { key: 'address', value: `0x${hex}` },          // 0x
-    { key: 'address', value: hex },                 // bare hex
-    { key: 'owner',   value: `eth|${hex}` },        // try owner param name
+    { key: 'address', value: `eth|${hex}` },
+    { key: 'address', value: `eth|0x${hex}` },
+    { key: 'address', value: `0x${hex}` },
+    { key: 'address', value: hex },
+    { key: 'owner',   value: `eth|${hex}` },
     { key: 'owner',   value: `eth|0x${hex}` },
     { key: 'owner',   value: `0x${hex}` },
     { key: 'owner',   value: hex },
@@ -118,17 +122,13 @@ function addrVariants(ownerNo0x) {
 async function tryFetch(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(String(r.status));
-  const j = await r.json();
-  return j;
+  return r.json();
 }
 
 function normalizeTokensShape(j) {
-  // Accept { tokens: [...] } directly
   if (Array.isArray(j?.tokens)) return { tokens: j.tokens, count: j.count ?? j.tokens.length };
-  // Accept { items: [...] }
-  if (Array.isArray(j?.items)) return { tokens: j.items, count: j.items.length };
-  // Accept plain array
-  if (Array.isArray(j)) return { tokens: j, count: j.length };
+  if (Array.isArray(j?.items))  return { tokens: j.items,  count: j.items.length };
+  if (Array.isArray(j))         return { tokens: j,        count: j.length };
   return { tokens: [], count: 0 };
 }
 
@@ -136,17 +136,14 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
   const candidates = [];
   const av = addrVariants(ownerNo0x);
   for (const a of av) {
-    // Gateway token-contract (legacy)
     candidates.push(`${GATEWAY_BASE_URL}/api/asset/token-contract/user/assets?${a.key}=${encodeURIComponent(a.value)}&page=${page}&limit=${limit}`);
     candidates.push(`${GATEWAY_BASE_URL}/api/asset/token-contract/assets?${a.key}=${encodeURIComponent(a.value)}&page=${page}&limit=${limit}`);
-    // Dex backend (SDK)
     candidates.push(`${DEX_BACKEND_BASE_URL}/user/assets?${a.key}=${encodeURIComponent(a.value)}&page=${page}&limit=${limit}`);
   }
 
-  // GalaConnect (current public API) — POST /galachain/api/{channel}/token-contract/FetchBalances
   const connectBodies = av.map(a => ({ owner: a.value }));
-
   const errors = [];
+
   for (const url of candidates) {
     try {
       const j = await tryFetch(url);
@@ -157,7 +154,6 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
     }
   }
 
-  // Try GalaConnect POST (asset channel)
   for (const body of connectBodies) {
     try {
       const r = await fetch(`${GALACONNECT_BASE_URL}/galachain/api/asset/token-contract/FetchBalances`, {
@@ -167,7 +163,6 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
       });
       if (!r.ok) throw new Error(String(r.status));
       const j = await r.json();
-      // Response shape: { Data: [ { collection, category, type, additionalKey, quantity, ... } ] }
       const arr = Array.isArray(j?.Data) ? j.Data : [];
       const tokens = arr.map(x => ({
         symbol: `${x.collection?.toUpperCase()}`,
@@ -226,17 +221,14 @@ app.get('/prices', async (_req, res) => {
   }
 });
 
-// Raw passthrough to inspect asset response (SDK -> fallback)
 app.get('/assets/raw', async (_req, res) => {
   try {
     if (!WALLET) return res.status(400).json({ error: 'WALLET_ADDRESS not set or invalid' });
 
-    // 1) Try SDK first
     try {
       const data = await gswap.assets.getUserAssets(WALLET, 1, 100);
       return res.json({ walletTried: WALLET, raw: data, via: 'sdk' });
     } catch (_e1) {
-      // 2) Smart fallback across hosts & param styles
       const out = await fetchAssetsAny(WALLET, 1, 100);
       if (out.ok) return res.json({ walletTried: WALLET, raw: out.raw, via: out.via });
       return res.status(404).json({ error: 'No assets route succeeded', attempts: out.errors });
@@ -246,20 +238,17 @@ app.get('/assets/raw', async (_req, res) => {
   }
 });
 
-// UI-friendly assets
 app.get('/assets', async (req, res) => {
   try {
     if (!WALLET) return res.status(400).json({ error: 'WALLET_ADDRESS not set or invalid' });
 
-    const strict = req.query.strict === '1'; // default non-strict
+    const strict = req.query.strict === '1';
 
-    // Step 1: SDK
     let data;
     try {
       data = await gswap.assets.getUserAssets(WALLET, 1, 100);
     } catch (e1) {
       if (strict) return res.status(400).json({ error: e1?.message || String(e1) });
-      // Step 2: smart fallback
       try {
         const out = await fetchAssetsAny(WALLET, 1, 100);
         if (out.ok) data = out.norm; else data = { tokens: [], count: 0 };
@@ -315,5 +304,5 @@ app.post('/swap', async (req, res) => {
   }
 });
 
-// ---------------------- Serverless export (NO app.listen) ----------------------
+// ---------------------- Serverless export ----------------------
 module.exports.handler = serverless(app);
