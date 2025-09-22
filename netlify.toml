@@ -1,3 +1,11 @@
 [build]
   publish   = "frontend"
   functions = "netlify/functions"
+
+[functions]
+  directory = "netlify/functions"
+  included_files = ["hybrid-bot.js"]
+  node_bundler = "esbuild"
+
+[functions."run-hybrid-bot"]
+  schedule = "*/30 * * * *"  # every 30 minutes (UTC)

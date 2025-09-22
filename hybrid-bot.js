@@ -1,7 +1,11 @@
 // hybrid-bot.js
-// Runs every ~30 minutes. Priority: try triangular ARBITRAGE first.
+// Runs every ~30 minutes (loop mode) or once (cron/sim). Priority: try triangular ARBITRAGE first.
 // If no profitable arb, randomly tries one of: MOMENTUM, MEAN_REVERT, FIBONACCI.
-// Enhanced "once" mode: `node hybrid-bot.js once` → richer simulations (no sockets/balances/swaps).
+// Extra: if NOTHING trades on a tick, do a tiny $0.50 USDC↔WETH "nudge" and alternate direction.
+// Modes:
+//   - `node hybrid-bot.js`        → normal loop mode (local/VM only)
+//   - `node hybrid-bot.js once`   → enhanced simulation (no sockets/balances/swaps)
+//   - `node hybrid-bot.js cron`   → single real tick & exit (use this in Netlify Scheduled Functions)
 
 require('dotenv').config();
 const fs = require('fs');
@@ -11,8 +15,9 @@ const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
 /* =========================================
    CLI / TEST FLAGS
    ========================================= */
-const ARG_ONCE = process.argv[2] === 'once'; // simulation-only mode
-const TEST_USD = 0.01; // legacy one-cent reference
+const ARG_MODE = process.argv[2];
+const ARG_ONCE = ARG_MODE === 'once'; // simulation-only mode
+const ARG_CRON = ARG_MODE === 'cron'; // one real tick & exit (serverless)
 
 /* =========================================
    ENV & CONSTANTS
@@ -43,16 +48,19 @@ const MEANREV_TH    = Number(process.env.MEANREV_TH || 0.006);
 
 // Fibonacci params
 const FIB_LOOKBACK  = Number(process.env.FIB_LOOKBACK || 96);
-const ENTRY_50_618  = true;  // use golden pocket
-const STOP_AT_786   = true;  // (kept for future TP/SL extensions)
+const ENTRY_50_618  = true;  // use golden pocket (kept for future)
+const STOP_AT_786   = true;  // kept for TP/SL extensions
 const USE_TP2       = true;
+
+// Micro “nudge” when nothing else trades
+const NUDGE_USD     = Number(process.env.NUDGE_USD || 0.5);
 
 // Endpoints
 const gatewayBaseUrl    = process.env.GATEWAY_BASE_URL || 'https://gateway-mainnet.galachain.com';
 const bundlerBaseUrl    = process.env.BUNDLER_BASE_URL || 'https://bundle-backend-prod1.defi.gala.com';
 const dexBackendBaseUrl = process.env.DEX_BACKEND_BASE_URL || undefined;
 
-// State file (for EMA/FIB in loop mode)
+// State file (for EMA/FIB & nudge tracking in loop/cron)
 const STATE_FILE = path.join(process.cwd(), 'hybrid_state.json');
 
 /* =========================================
@@ -90,12 +98,16 @@ function emaUpdate(prev, p, alpha){ return prev==null ? p : alpha*p + (1-alpha)*
 function loadState(){
   try { if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE,'utf8')); }
   catch {}
-  return { ema:null, prices:[], position:null };
+  return { ema:null, prices:[], position:null, flipDir: 'USDC2WETH' };
 }
 function saveState(s){ try { fs.writeFileSync(STATE_FILE, JSON.stringify(s,null,2)); } catch {} }
 
 async function ensureSocket(){
-  if (!GSwap.events.isConnected?.()) await GSwap.events.connectEventSocket();
+  // Some SDK builds may not ship events; guard all calls
+  try {
+    if (GSwap?.events?.isConnected?.()) return;
+    if (GSwap?.events?.connectEventSocket) await GSwap.events.connectEventSocket();
+  } catch {}
 }
 
 async function getBalancesPaged() {
@@ -124,6 +136,10 @@ async function quoteExactIn(tokenIn, tokenOut, amountIn){
 }
 async function spotUsdcPerGala(){
   const q = await gswap.quoting.quoteExactInput(TOKEN_GALA, TOKEN_USDC, '1');
+  return Number(q.outTokenAmount);
+}
+async function spotUsdcPerWeth(){
+  const q = await gswap.quoting.quoteExactInput(TOKEN_WETH, TOKEN_USDC, '1');
   return Number(q.outTokenAmount);
 }
 
@@ -156,6 +172,35 @@ async function sellGalaByUsdNotional(usd){
     { exactIn: galaAmt.toString(), amountOutMinimum: minOut }, WALLET);
   const receipt = await pending.wait();
   console.log('✅ SELL done:', { txId: receipt.txId, hash: receipt.transactionHash });
+  return receipt;
+}
+
+// === Micro nudge helpers (USDC ↔ WETH) ===
+async function buyWethByUsd(usd){
+  const exactInUsdc = usd.toString();
+  const q = await gswap.quoting.quoteExactInput(TOKEN_USDC, TOKEN_WETH, exactInUsdc);
+  const minOut = bpsMul(String(q.outTokenAmount), SLIPPAGE_BPS);
+  console.log('NUDGE BUY WETH:', { usd: exactInUsdc, expectWeth: String(q.outTokenAmount), minOut, feeTier:q.feeTier, DRY_RUN });
+  if (DRY_RUN) return { simulated:true };
+  await ensureSocket();
+  const pending = await gswap.swaps.swap(TOKEN_USDC, TOKEN_WETH, q.feeTier,
+    { exactIn: exactInUsdc, amountOutMinimum: minOut }, WALLET);
+  const receipt = await pending.wait();
+  console.log('✅ NUDGE USDC→WETH done:', { txId: receipt.txId, hash: receipt.transactionHash });
+  return receipt;
+}
+async function sellWethByUsdNotional(usd){
+  const price = await spotUsdcPerWeth();      // USDC per 1 WETH
+  const wethAmt = usd / price;                 // sell this many WETH
+  const q = await gswap.quoting.quoteExactInput(TOKEN_WETH, TOKEN_USDC, String(wethAmt));
+  const minOut = bpsMul(String(q.outTokenAmount), SLIPPAGE_BPS);
+  console.log('NUDGE SELL WETH:', { exactInWeth: wethAmt.toString(), expectUsdc: String(q.outTokenAmount), minOut, feeTier:q.feeTier, DRY_RUN });
+  if (DRY_RUN) return { simulated:true };
+  await ensureSocket();
+  const pending = await gswap.swaps.swap(TOKEN_WETH, TOKEN_USDC, q.feeTier,
+    { exactIn: wethAmt.toString(), amountOutMinimum: minOut }, WALLET);
+  const receipt = await pending.wait();
+  console.log('✅ NUDGE WETH→USDC done:', { txId: receipt.txId, hash: receipt.transactionHash });
   return receipt;
 }
 
@@ -305,7 +350,7 @@ async function runFibonacci(state, price){
 }
 
 /* =========================================
-   MAIN TICK (normal loop)
+   MAIN TICK (normal loop & cron)
    ========================================= */
 async function tick(){
   try {
@@ -316,6 +361,8 @@ async function tick(){
     pushPrice(state, price);
     saveState(state);
 
+    let didTrade = false;
+
     // 1) Triangular arb first
     const balances = await getBalancesPaged();
     if (balances.USDC > ARB_START_USD*0.9) {
@@ -324,7 +371,8 @@ async function tick(){
       if (sim.ok) {
         console.log('🎯 Executing triangular arbitrage…');
         await execTriangle(sim);
-        return; // done this tick
+        didTrade = true;
+        return; // done this tick after triangle
       }
     } else {
       console.log('Skip arb: insufficient USDC balance.');
@@ -335,9 +383,25 @@ async function tick(){
     const pick = strategies[Math.floor(Math.random()*strategies.length)];
     console.log(`No profitable arb → trying ${pick}… (price=${price.toFixed(6)} ema=${(state.ema??price).toFixed(6)})`);
 
-    if (pick==='MOMENTUM')         await runMomentum(state, price);
-    else if (pick==='MEAN_REVERT') await runMeanRevert(state, price);
-    else if (pick==='FIBONACCI')   await runFibonacci(state, price);
+    let res;
+    if (pick==='MOMENTUM')         res = await runMomentum(state, price);
+    else if (pick==='MEAN_REVERT') res = await runMeanRevert(state, price);
+    else if (pick==='FIBONACCI')   res = await runFibonacci(state, price);
+    if (res) didTrade = true;
+
+    // 3) If STILL nothing executed, perform a $0.50 USDC↔WETH nudge, alternating each "no-change" tick
+    if (!didTrade) {
+      const dir = state.flipDir || 'USDC2WETH';
+      console.log(`No strategy fired → NUDGE ${NUDGE_USD} USDC (${dir === 'USDC2WETH' ? 'USDC→WETH' : 'WETH→USDC'})`);
+      try {
+        if (dir === 'USDC2WETH') await buyWethByUsd(NUDGE_USD);
+        else                     await sellWethByUsdNotional(NUDGE_USD);
+      } catch (e) {
+        console.warn('Nudge failed (non-fatal):', e?.message || e);
+      }
+      state.flipDir = (dir === 'USDC2WETH') ? 'WETH2USDC' : 'USDC2WETH';
+      saveState(state);
+    }
 
   } catch (e) {
     console.error('❌ Tick error:', e?.message || e);
@@ -518,6 +582,21 @@ async function loop(){
     process.exit(0);
   }
 
+  // Netlify Scheduled Function entry: do one tick of the real strategy and exit
+  if (ARG_CRON) {
+    try {
+      console.log('Hybrid Bot cron tick starting…');
+      await tick();
+      console.log('Hybrid Bot cron tick finished.');
+      try { await GSwap?.events?.disconnectEventSocket?.(); } catch {}
+      process.exit(0);
+    } catch (e) {
+      console.error('Cron tick failed:', e?.message || e);
+      try { await GSwap?.events?.disconnectEventSocket?.(); } catch {}
+      process.exit(1);
+    }
+  }
+
   console.log('Hybrid Bot starting…', {
     wallet: WALLET,
     intervalMin: INTERVAL_MIN,
@@ -537,7 +616,7 @@ async function loop(){
 
   const shutdown = async (sig) => {
     console.log(`${sig} received, closing…`);
-    try { await GSwap.events.disconnectEventSocket?.(); } catch {}
+    try { await GSwap?.events?.disconnectEventSocket?.(); } catch {}
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
