@@ -2,7 +2,7 @@ name: GalaDEX Bot
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes (UTC)
+    - cron: '*/15 * * * *'   # every 15 minutes (UTC)
   workflow_dispatch:
 
 permissions:
@@ -17,166 +17,38 @@ jobs:
       cancel-in-progress: true
 
     steps:
-      - name: Checkout (optional)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
+          cache: 'npm'
 
-      - name: Init project & install deps
+      - name: Install deps
         run: |
-          npm init -y >/dev/null 2>&1 || true
-          npm i @gala-chain/gswap-sdk dotenv
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm i
+          fi
 
-      - name: Write bot.js
-        run: |
-          cat > bot.js <<'EOF'
-// Minimal GalaSwap bot (one-shot). Strategy: swap fixed USD size on a chosen pair/direction.
-// Configure via env: PAIR, DIRECTION, USD_SIZE, SLIPPAGE_BPS, DRY_RUN.
-// Pairs supported: "GALA-GUSDC" or "GWETH-GUSDC" (ETH on GalaChain is GWETH).
-
-require('dotenv').config();
-const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
-
-const cfg = {
-  WALLET:        (process.env.WALLET_ADDRESS || '').trim(),   // e.g. "eth|0xabc..."
-  PRIVATE_KEY:   (process.env.PRIVATE_KEY || '').trim(),
-  DRY_RUN:       (process.env.DRY_RUN || 'true').toLowerCase() === 'true',
-  PAIR:          (process.env.PAIR || 'GALA-GUSDC').toUpperCase(), // "GALA-GUSDC" | "GWETH-GUSDC"
-  DIRECTION:     (process.env.DIRECTION || 'SELL').toUpperCase(),  // SELL = token0->token1, BUY = token1->token0
-  USD_SIZE:      Number(process.env.USD_SIZE || 1),                 // USD notional per run
-  SLIPPAGE_BPS:  Number(process.env.SLIPPAGE_BPS || 100),          // 100 = 1%
-  gatewayBaseUrl:    process.env.GATEWAY_BASE_URL,
-  bundlerBaseUrl:    process.env.BUNDLER_BASE_URL,
-  dexBackendBaseUrl: process.env.DEX_BACKEND_BASE_URL,
-};
-
-const CLASS_KEYS = {
-  GALA:  'GALA|Unit|none|none',
-  GUSDC: 'GUSDC|Unit|none|none',
-  GWETH: 'GWETH|Unit|none|none',
-};
-
-function bpsMul(x, bps) {
-  const n = Number(x);
-  return ((n * (10000 - bps)) / 10000).toString();
-}
-
-function pickTokens(pair, direction) {
-  const [a, b] = pair.split('-');
-  if (!CLASS_KEYS[a] || !CLASS_KEYS[b]) throw new Error('Unsupported PAIR');
-  if (direction === 'SELL') return { tokenIn: CLASS_KEYS[a], tokenOut: CLASS_KEYS[b] };
-  if (direction === 'BUY')  return { tokenIn: CLASS_KEYS[b], tokenOut: CLASS_KEYS[a] };
-  throw new Error('DIRECTION must be SELL or BUY');
-}
-
-async function dollarsToToken(amountUsd, tokenSymbol, gswap) {
-  // Use a fresh quote of "1 token → GUSDC" to get price, then invert to size.
-  if (tokenSymbol === 'GUSDC') return String(amountUsd); // paying in USDC
-  const q = await gswap.quoting.quoteExactInput(CLASS_KEYS[tokenSymbol], CLASS_KEYS.GUSDC, '1');
-  const priceUsdPerToken = Number(q.outTokenAmount);
-  if (!priceUsdPerToken || priceUsdPerToken <= 0) throw new Error(`No price for ${tokenSymbol}`);
-  return (amountUsd / priceUsdPerToken).toString();
-}
-
-async function main() {
-  if (!cfg.WALLET)       throw new Error('WALLET_ADDRESS missing');
-  if (!cfg.DRY_RUN && !cfg.PRIVATE_KEY) throw new Error('PRIVATE_KEY missing and DRY_RUN=false');
-
-  const { tokenIn, tokenOut } = pickTokens(cfg.PAIR, cfg.DIRECTION);
-
-  const gswap = new GSwap({
-    signer: new PrivateKeySigner(cfg.PRIVATE_KEY || '0x'),
-    walletAddress: cfg.WALLET,
-    gatewayBaseUrl: cfg.gatewayBaseUrl,
-    bundlerBaseUrl: cfg.bundlerBaseUrl,
-    dexBackendBaseUrl: cfg.dexBackendBaseUrl,
-  });
-
-  try {
-    // Determine tokenIn amount from USD notional
-    let amountIn;
-    if (tokenIn === CLASS_KEYS.GUSDC) {
-      amountIn = String(cfg.USD_SIZE);
-    } else {
-      // derive amountIn by converting USD -> tokenIn using a price quote
-      const sym = Object.keys(CLASS_KEYS).find(k => CLASS_KEYS[k] === tokenIn);
-      amountIn = await dollarsToToken(cfg.USD_SIZE, sym, gswap);
-    }
-
-    // Quote trade to get fee tier & minOut
-    const q = await gswap.quoting.quoteExactInput(tokenIn, tokenOut, amountIn);
-    const feeTier     = q.feeTier;
-    const expectedOut = String(q.outTokenAmount);
-    const minOut      = bpsMul(expectedOut, cfg.SLIPPAGE_BPS);
-
-    console.log('Plan', JSON.stringify({
-      DRY_RUN: cfg.DRY_RUN, pair: cfg.PAIR, direction: cfg.DIRECTION,
-      usdSize: cfg.USD_SIZE, amountIn, expectedOut, minOut, feeTier
-    }));
-
-    if (cfg.DRY_RUN) {
-      console.log('DRY RUN → no swap executed.');
-      return;
-    }
-
-    // Submit swap and wait for confirmation
-    const pending = await gswap.swaps.swap(
-      tokenIn, tokenOut, feeTier,
-      { exactIn: amountIn, amountOutMinimum: minOut },
-      cfg.WALLET
-    );
-
-    // This wait uses the event socket; okay on Actions for one-shot jobs.
-    const receipt = await pending.wait();
-    console.log('✅ Swap confirmed', JSON.stringify({
-      txId: receipt.txId, hash: receipt.transactionHash
-    }));
-  } catch (e) {
-    console.error('❌ Bot error:', e?.stack || e?.message || String(e));
-    process.exitCode = 1;
-  }
-}
-
-main();
-EOF
-
-      - name: Env sanity (no secrets leaked)
-        run: |
-          echo "PAIR=${PAIR}"
-          echo "DIRECTION=${DIRECTION}"
-          echo "USD_SIZE=${USD_SIZE}"
-          echo "SLIPPAGE_BPS=${SLIPPAGE_BPS}"
-          echo "DRY_RUN=${DRY_RUN}"
-          echo "WALLET_ADDRESS prefix: ${WALLET_ADDRESS:0:10}..."
-          test -n "$PRIVATE_KEY" && echo "PRIVATE_KEY present: yes" || echo "PRIVATE_KEY present: no"
+      - name: Env sanity
         env:
           WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
           PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}
-          # Tunables (safe defaults)
-          DRY_RUN:        "true"          # ← switch to "false" to trade live
-          PAIR:           "GALA-GUSDC"    # or "GWETH-GUSDC"
-          DIRECTION:      "SELL"          # SELL=token0->token1, BUY=token1->token0
-          USD_SIZE:       "1"             # USD notional per run (start tiny; e.g., 25 later)
-          SLIPPAGE_BPS:   "200"           # 2% slippage guard
+          DRY_RUN:        "true"      # set "false" when ready to trade
+          BOT_USD_CENTS:  "1"
+          SLIPPAGE_BPS:   "200"
+        run: |
+          echo "DRY_RUN=${DRY_RUN}"
+          echo "WALLET_ADDRESS prefix: ${WALLET_ADDRESS:0:10}..."
+          test -n "$PRIVATE_KEY" && echo "PRIVATE_KEY present: yes" || echo "PRIVATE_KEY present: no"
 
       - name: Run bot once
         env:
           WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
           PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}
-          # Tunables (duplicate here so the bot sees them)
-          DRY_RUN:        "true"          # ← set "false" when ready
-          PAIR:           "GALA-GUSDC"    # or "GWETH-GUSDC"
-          DIRECTION:      "SELL"          # or "BUY"
-          USD_SIZE:       "1"             # try 25 when confident
+          DRY_RUN:        "true"      # flip to "false" to trade live
+          BOT_USD_CENTS:  "1"
           SLIPPAGE_BPS:   "200"
-        run: node bot.js
-
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bot-logs
-          path: .
+        run: node bot.js once
