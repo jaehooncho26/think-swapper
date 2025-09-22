@@ -35,12 +35,6 @@
     .pill { display:inline-block; padding:5px 30px; border:2px solid #9c6025; border-radius:999px; font-family:monospace; background:#edba87; color:#000000; }
     .right { text-align:right; }
     .text-value-pair { display:flex; gap:8px; justify-content:center; align-items:center; }
-    .text-descriptions { display:flex; gap:8px; margin-top:100px; margin-bottom:80px; margin-left:200px; margin-right:200px; justify-content:center; align-items:center; }
-    .text-titles { display:flex; gap:8px; margin-top:50px; margin-bottom:20px; margin-left:200px; margin-right:200px; justify-content:center; align-items:center; }
-
-    /* Logo + Label */
-    .token-label { display:flex; align-items:center; gap:8px; }
-    .token-label img { height:40px; width:auto; }
 
     /* Transactions */
     .tx-title { font-size:28px; font-weight:bold; margin:4px 0 12px; text-align:center; }
@@ -54,6 +48,7 @@
     .tx-pills { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .tx-empty { text-align:center; opacity:0.8; padding:12px 0; }
     .tx-note { font-size:12px; opacity:0.7; margin-top:6px; text-align:center; }
+    .tx-badge { font-size:12px; padding:2px 8px; border-radius:999px; background:#333; margin-left:8px; }
   </style>
 </head>
 <body>
@@ -70,7 +65,7 @@
       <div class="card">
         <div class="text-value-pair">
           <div class="token-label">
-            <img src="usdclogo.png" alt="USDC logo">
+            <img src="usdclogo.png" alt="USDC logo" style="height:40px;width:auto;">
             <div class="muted">USDC:</div>
           </div>
           <div id="pUSDC" class="pill">—</div>
@@ -79,7 +74,7 @@
       <div class="card">
         <div class="text-value-pair">
           <div class="token-label">
-            <img src="galalogo.png" alt="GALA logo">
+            <img src="galalogo.png" alt="GALA logo" style="height:40px;width:auto;">
             <div class="muted">GALA:</div>
           </div>
           <div id="pGALA" class="pill">—</div>
@@ -88,7 +83,7 @@
       <div class="card">
         <div class="text-value-pair">
           <div class="token-label">
-            <img src="ethlogo.png" alt="ETH logo">
+            <img src="ethlogo.png" alt="ETH logo" style="height:40px;width:auto;">
             <div class="muted">ETH:</div>
           </div>
           <div id="pETH" class="pill">—</div>
@@ -105,7 +100,7 @@
       <div class="card">
         <div class="text-value-pair">
           <div class="token-label">
-            <img src="usdclogo.png" alt="USDC logo">
+            <img src="usdclogo.png" alt="USDC logo" style="height:40px;width:auto;">
             <div class="muted">USDC:</div>
           </div>
           <div id="bUSDC" class="pill">N/A</div>
@@ -114,7 +109,7 @@
       <div class="card">
         <div class="text-value-pair">
           <div class="token-label">
-            <img src="galalogo.png" alt="GALA logo">
+            <img src="galalogo.png" alt="GALA logo" style="height:40px;width:auto;">
             <div class="muted">GALA:</div>
           </div>
           <div id="bGALA" class="pill">N/A</div>
@@ -123,7 +118,7 @@
       <div class="card">
         <div class="text-value-pair">
           <div class="token-label">
-            <img src="ethlogo.png" alt="ETH logo">
+            <img src="ethlogo.png" alt="ETH logo" style="height:40px;width:auto;">
             <div class="muted">ETH:</div>
           </div>
           <div id="bETH" class="pill">N/A</div>
@@ -149,13 +144,11 @@
       </div>
       <div id="txNote" class="tx-note"></div>
     </div>
-
-    <h1 class="text-descriptions"></h1>
   </div>
 
   <script>
     const API_BASE = '/.netlify/functions/sidecar';
-    const DISPLAY_TZ = 'America/Los_Angeles'; // force Pacific time
+    const DISPLAY_TZ = 'America/Los_Angeles'; // change if you want another display TZ
 
     const $ = id => document.getElementById(id);
     const pGALA=$('pGALA'), pUSDC=$('pUSDC'), pETH=$('pETH');
@@ -190,8 +183,7 @@
       return d.toLocaleString(undefined, {
         year:'numeric', month:'short', day:'2-digit',
         hour:'2-digit', minute:'2-digit', second:'2-digit',
-        timeZone: DISPLAY_TZ,
-        timeZoneName:'short'
+        timeZone: DISPLAY_TZ, timeZoneName:'short'
       });
     }
 
@@ -267,13 +259,13 @@
       txList.innerHTML = sorted.map(tx => {
         const rawTs = tx.ts ?? tx.time ?? tx.timestamp ?? tx.meta?.timestamp;
         const label = fmtTime(rawTs) || '—';
+        const seeded = !!tx.meta?.seeded;
         const after = tx.after || {};
         const usdcStr = after.GUSDC ?? after.USDC ?? '0';
         const galaStr = after.GALA  ?? '0';
         const wethStr = after.GWETH ?? after.WETH ?? '0';
         const usdc = toNum(usdcStr), gala = toNum(galaStr), weth = toNum(wethStr);
 
-        // Prefer historical total from sidecar; otherwise show ≈ using current prices
         const hasHist = tx.usdTotalAt != null && isFinite(Number(tx.usdTotalAt));
         const histTotal = hasHist ? Number(tx.usdTotalAt) : null;
         const approxNow = (usdc) + (gala * (latestPrices.GALA || 0)) + (weth * (latestPrices.ETH || 0));
@@ -285,7 +277,11 @@
 
         return `
           <div class="tx-row" title="${iso ? `ISO: ${iso}` : ''}">
-            <div class="tx-time">${label}${id ? ` — <span style="opacity:.7">(${id.slice(0,6)}…${id.slice(-6)})</span>` : ''}</div>
+            <div class="tx-time">
+              ${label}
+              ${id ? ` — <span style="opacity:.7">(${id.slice(0,6)}…${id.slice(-6)})</span>` : ''}
+              ${seeded ? ` <span class="tx-badge">snapshot (not a tx)</span>` : ''}
+            </div>
             <div class="tx-pills">
               <span class="pill">USDC: ${usdcStr}</span>
               <span class="pill">GALA: ${galaStr}</span>
@@ -296,7 +292,10 @@
         `;
       }).join('');
 
-      txNote.textContent = note || ( 'Totals use historical prices when available; otherwise an approximate current-price total (shown with “≈”). Times shown in ' + DISPLAY_TZ + '.' );
+      txNote.textContent = note || (
+        'Times shown in ' + DISPLAY_TZ +
+        '. “snapshot” rows are current-balance captures (not on-chain txs).'
+      );
     }
 
     // If some rows lack a valid timestamp but have a txId/hash, ask the sidecar to resolve it.
@@ -326,49 +325,24 @@
       renderTxs(lastTxsData);
     }
 
-    // Fallback: one snapshot if /txs is empty
-    async function fallbackSnapshot() {
-      try {
-        const r = await fetch(`${API_BASE}/assets`);
-        if (!r.ok) throw new Error('assets ' + r.status);
-        const j = await r.json();
-        const arr = Array.isArray(j.tokens) ? j.tokens : [];
-        const map = new Map(arr.map(t => [String(t.symbol).toUpperCase(), String(t.quantity)]));
-        const row = {
-          ts: Date.now(),
-          after: {
-            GUSDC: map.get('GUSDC') ?? '0',
-            GALA:  map.get('GALA')  ?? '0',
-            GWETH: map.get('GWETH') ?? '0'
-          },
-          meta: { seeded: true }
-        };
-        renderTxs([row], 'Showing current snapshot (no tx history available yet).');
-      } catch {
-        renderTxs([], 'No transactions yet.');
-      }
-    }
-
+    // No fallback snapshot anymore — better to show “No transactions yet” than a now-timestamp.
     async function fetchTxs() {
-      // try enriched endpoint first
       try {
-        let r = await fetch(`${API_BASE}/txs/usd?limit=50`);
-        if (!r.ok) {
-          // fall back to plain txs
-          r = await fetch(`${API_BASE}/txs?limit=50`);
-        }
+        // Ask sidecar NOT to seed: seed=0 prevents a "now" row.
+        let r = await fetch(`${API_BASE}/txs/usd?limit=50&seed=0`);
+        if (!r.ok) r = await fetch(`${API_BASE}/txs?limit=50&seed=0`);
         if (!r.ok) throw new Error('txs ' + r.status);
         const j = await r.json();
         const list = Array.isArray(j.txs) ? j.txs : [];
         if (list.length === 0) {
-          await fallbackSnapshot();
+          renderTxs([], 'No transactions found.');
         } else {
           renderTxs(list);
           fillMissingTimestamps(list);
         }
       } catch (e) {
         console.error(e);
-        await fallbackSnapshot();
+        renderTxs([], 'No transactions found.');
       }
     }
 
@@ -387,6 +361,5 @@
     setInterval(() => fetchTxs().catch(()=>{}), 15000);
     refreshAll();
   </script>
-
 </body>
 </html>
