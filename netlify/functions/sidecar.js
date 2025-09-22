@@ -37,6 +37,39 @@ function maskPK(pk) {
   return s.length > 14 ? s.slice(0, 6) + '...' + s.slice(-6) : '(short key)';
 }
 
+// Normalize number or ISO to epoch ms (seconds auto-converted)
+function normEpochMs(v) {
+  if (v == null) return 0;
+  if (typeof v === 'string' && /\D/.test(v)) {
+    const ms = Date.parse(v);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 2e10 ? Math.round(n * 1000) : Math.round(n);
+}
+
+// Attempt to pull a timestamp out of an arbitrary object
+function extractTxTimestamp(obj) {
+  if (!obj || typeof obj !== 'object') return 0;
+  const numericFields = [obj.timestamp, obj.blockTimestamp, obj.time, obj.ts, obj.createdAt, obj.completedAt];
+  for (const f of numericFields) {
+    const ms = normEpochMs(f);
+    if (ms) return ms;
+  }
+  const stringFields = [obj.timestamp, obj.blockTime, obj.block_date, obj.block_time, obj.date, obj.time]
+    .filter(x => typeof x === 'string');
+  for (const s of stringFields) {
+    const ms = normEpochMs(s);
+    if (ms) return ms;
+  }
+  if (obj.receipt) {
+    const ms = extractTxTimestamp(obj.receipt);
+    if (ms) return ms;
+  }
+  return 0;
+}
+
 // ---------------------- Env ----------------------
 const RAW_WALLET = process.env.WALLET_ADDRESS || '';
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
@@ -45,6 +78,11 @@ const GATEWAY_BASE_URL     = process.env.GATEWAY_BASE_URL     || 'https://gatewa
 const DEX_BACKEND_BASE_URL = process.env.DEX_BACKEND_BASE_URL || 'https://dex-backend-prod1.defi.gala.com';
 const BUNDLER_BASE_URL     = process.env.BUNDLER_BASE_URL     || 'https://bundle-backend-prod1.defi.gala.com';
 const GALACONNECT_BASE_URL = process.env.GALACONNECT_BASE_URL || 'https://api-galaswap.gala.com';
+
+const EXPLORER_BASE_URL    = process.env.EXPLORER_BASE_URL    || 'https://explorer-api.galachain.com/v1/explorer';
+const EXPLORER_CHANNELS    = (process.env.EXPLORER_CHANNELS   || 'asset,dex')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const EXPLORER_LOOKBACK    = Math.max(1, Number(process.env.EXPLORER_LOOKBACK || 1500));
 
 const WALLET = normalizeWalletNo0x(RAW_WALLET);
 if (!WALLET) {
@@ -179,7 +217,6 @@ async function fetchAssetsAny(ownerNo0x, page = 1, limit = 100) {
 
 // Return the three core balances as strings
 async function fetchCoreBalances() {
-  // Try SDK first, then fall back to the smart fetcher
   let data;
   try {
     data = await gswap.assets.getUserAssets(WALLET, 1, 100);
@@ -197,11 +234,68 @@ async function fetchCoreBalances() {
   };
 }
 
+// ---------------------- Explorer helpers (tx timestamp) ----------------------
+function txMatches(obj, txId) {
+  const cand = [obj?.txid, obj?.txId, obj?.hash, obj?.transactionHash, obj?.id];
+  return cand.some(v => v && String(v).toLowerCase() === String(txId).toLowerCase());
+}
+
+function pickTxTimestamp(hit, blk) {
+  // prefer tx timestamp, then block
+  const ms = normEpochMs(hit?.timestamp || hit?.time || hit?.date) || normEpochMs(blk?.timestamp || blk?.time || blk?.date);
+  return ms || 0;
+}
+
+async function explorerLatestHeight(channel) {
+  const u = `${EXPLORER_BASE_URL}/height/${encodeURIComponent(channel)}`;
+  const j = await tryFetch(u);
+  return Number(j?.height ?? j ?? 0);
+}
+
+async function explorerBlock(channel, height) {
+  const u = `${EXPLORER_BASE_URL}/blocks/${encodeURIComponent(channel)}/${encodeURIComponent(height)}`;
+  return tryFetch(u);
+}
+
+async function findTxTimestamp(txId, channels) {
+  const chans = Array.isArray(channels) && channels.length ? channels : EXPLORER_CHANNELS;
+  for (const ch of chans) {
+    try {
+      let height = await explorerLatestHeight(ch);
+      if (!height || !Number.isFinite(height)) continue;
+
+      const max = Math.min(EXPLORER_LOOKBACK, height + 1);
+      for (let i = 0; i < max && height - i >= 0; i++) {
+        const h = height - i;
+        let blk;
+        try {
+          blk = await explorerBlock(ch, h);
+        } catch { continue; }
+
+        const txs = Array.isArray(blk?.transactions)
+          ? blk.transactions
+          : (Array.isArray(blk?.txs) ? blk.txs : []);
+
+        if (!txs || txs.length === 0) continue;
+
+        const hit = txs.find(t => txMatches(t, txId));
+        if (hit) {
+          const ts = pickTxTimestamp(hit, blk);
+          return { channel: ch, block: h, timestamp: ts, tx: { id: hit?.txid || hit?.txId || hit?.hash || hit?.id } };
+        }
+      }
+    } catch {
+      // try next channel
+    }
+  }
+  return null;
+}
+
 // ---------------------- Simple in-memory TX log ----------------------
 const TX_LOG = []; // newest appended at end; capped to 500 entries
-function pushTx(after, meta) {
+function pushTx(after, meta, tsOverride) {
   const entry = {
-    ts: Date.now(),
+    ts: normEpochMs(tsOverride) || Date.now(),
     after: {
       GUSDC: String(after?.GUSDC ?? after?.USDC ?? '0'),
       GALA:  String(after?.GALA  ?? '0'),
@@ -238,6 +332,7 @@ app.get('/debug', (_req, res) => res.json({
   gateway: GATEWAY_BASE_URL,
   dexBackend: DEX_BACKEND_BASE_URL,
   bundler: BUNDLER_BASE_URL,
+  explorer: { base: EXPLORER_BASE_URL, channels: EXPLORER_CHANNELS, lookback: EXPLORER_LOOKBACK },
   paths: {
     dexContractBasePath: '/api/asset/dexv3-contract',
     tokenContractBasePath: '/api/asset/token-contract',
@@ -295,21 +390,36 @@ app.get('/assets', async (req, res) => {
 });
 
 // ---------------------- Transactions ----------------------
-// Returns recent transactions recorded by this sidecar (newest first).
-// If there is no history yet, seeds one snapshot from current balances.
 app.get('/txs', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 50));
-    if (TX_LOG.length === 0) {
+    const doSeed = (req.query.seed ?? '1') !== '0'; // default seed on
+    if (doSeed && TX_LOG.length === 0) {
       try {
         const after = await fetchCoreBalances();
         pushTx(after, { seeded: true });
-      } catch {
-        // ignore seed failure; return empty list
-      }
+      } catch { /* ignore seed failure */ }
     }
     const out = TX_LOG.slice(-limit).reverse();
     res.json({ wallet: WALLET || null, count: out.length, txs: out });
+  } catch (e) {
+    res.status(400).json({ error: e?.message || String(e) });
+  }
+});
+
+// Look up a transaction's timestamp via explorer
+app.get('/tx-time', async (req, res) => {
+  try {
+    const txId = String(req.query.txId || req.query.hash || '').trim();
+    const channels = String(req.query.channels || '').trim()
+      ? String(req.query.channels).split(',').map(s => s.trim()).filter(Boolean) : EXPLORER_CHANNELS;
+
+    if (!txId) return res.status(400).json({ error: 'txId required' });
+
+    const found = await findTxTimestamp(txId, channels);
+    if (!found) return res.status(404).json({ error: 'timestamp not found', txId, channels });
+
+    res.json({ txId, ...found });
   } catch (e) {
     res.status(400).json({ error: e?.message || String(e) });
   }
@@ -342,15 +452,24 @@ app.post('/swap', async (req, res) => {
     );
     const done = await tx.wait();
 
-    // After the swap settles, capture a balances snapshot for the log
+    // Determine the best timestamp: SDK object or Explorer lookup
+    let txTs = extractTxTimestamp(done);
+    if (!txTs && done?.txId) {
+      try {
+        const found = await findTxTimestamp(done.txId);
+        if (found?.timestamp) txTs = found.timestamp;
+      } catch {/* ignore */}
+    }
+
+    // Snapshot balances and log with timestamp (fallback to now if none)
     try {
       const after = await fetchCoreBalances();
-      pushTx(after, { txId: done.txId, hash: done.transactionHash });
+      pushTx(after, { txId: done.txId, hash: done.transactionHash }, txTs);
     } catch (eSnap) {
       console.warn('Swap completed but failed to snapshot balances:', String(eSnap?.message || eSnap));
     }
 
-    res.json({ txId: done.txId, hash: done.transactionHash });
+    res.json({ txId: done.txId, hash: done.transactionHash, timestamp: txTs || Date.now() });
   } catch (e) {
     res.status(400).json({ error: e?.message || String(e) });
   }
