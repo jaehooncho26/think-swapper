@@ -28,7 +28,7 @@ env:
   MAX_POSITION_USD_PER_TOKEN: "150"  # cap inventory per asset (GALA/GWETH)
   MAX_NET_EXPOSURE_USD: "300"        # cap total inventory across both
   CIRCUIT_BREAKER_MAX_FAILS: "4"     # stop submitting swaps this run after N errors
-  DRY_RUN: "true"                # flip to "false" after testing
+  DRY_RUN: "false"                # flip to "false" after testing
 
   # ===== Token composite keys (GalaChain) =====
   T_GUSDC: "GUSDC$Unit$none$none"
