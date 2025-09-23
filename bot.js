@@ -1,9 +1,8 @@
-// bot.js
+// bot.js (updated)
 // Flip–Flop bot for GalaSwap using @gala-chain/gswap-sdk
-// Every tick (10m via GitHub Actions):
-// 1) Try to SELL GALA->GUSDT and GWETH->GUSDT if profitable vs ~$1 basis
-// 2) BUY ~$1 of GALA (even slots) or GWETH (odd slots)
-// Safe for zero balances and bad quotes; supports DRY_RUN and one-shot mode (`node bot.js once`)
+// - Fixes: "Invalid limit: must be an integer between 1 and 100" (now paginates at 100)
+// - Robust stable detection: works with GUSDT or GUSDC (prefers GUSDT if both)
+// - Safe for zero balances and bad quotes; supports DRY_RUN and one-shot mode (`node bot.js once`)
 
 require('dotenv').config();
 const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
@@ -18,17 +17,18 @@ const INTERVAL_MIN  = Number(process.env.BOT_INTERVAL_MIN || 10);
 const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);      // 100 = $1
 const SLIPPAGE_BPS  = Number(process.env.SLIPPAGE_BPS || 50);        // 0.50%
 const MIN_PROFIT_BPS= Number(process.env.MIN_PROFIT_BPS || 10);      // 0.10%
+const DEBUG         = ((process.env.DEBUG || 'false').toLowerCase() === 'true');
 
-// Optional endpoints (defaults are fine)
+// Optional endpoints (defaults are fine; set if you need a specific env)
 const gatewayBaseUrl    = process.env.GATEWAY_BASE_URL;
 const bundlerBaseUrl    = process.env.BUNDLER_BASE_URL;
 const dexBackendBaseUrl = process.env.DEX_BACKEND_BASE_URL || undefined;
 
 // GalaChain token class keys (G = GalaChain-wrapped)
-// Note: "GUSDT" is USDT on GalaChain; "GWETH" is ETH on GalaChain.
 const GALA   = 'GALA|Unit|none|none';
 const GWETH  = 'GWETH|Unit|none|none';
 const GUSDT  = 'GUSDT|Unit|none|none';
+const GUSDC  = 'GUSDC|Unit|none|none';
 
 // -----------------------------
 // Basic validation
@@ -53,6 +53,10 @@ const gswap = new GSwap({
   dexBackendBaseUrl,
 });
 
+if (DEBUG) {
+  console.log('[ENDPOINTS]', { gatewayBaseUrl, bundlerBaseUrl, dexBackendBaseUrl, wallet: WALLET });
+}
+
 // -----------------------------
 // Helpers
 // -----------------------------
@@ -74,7 +78,7 @@ function bpsMulStr(xStr, bps) {
   const x = Number(xStr);
   return ((x * (10000 - bps)) / 10000).toString();
 }
-function gainBps(inUSDC, outUSDC) { // keeping variable names unchanged to minimize diffs
+function gainBps(inUSDC, outUSDC) { // keeping var names unchanged to minimize diffs
   return ((outUSDC - inUSDC) / Math.max(0.000001, inUSDC)) * 10000;
 }
 
@@ -84,21 +88,49 @@ async function ensureSocket() {
   }
 }
 
+// -------- Balances (fixed: pageSize max 100 + pagination) --------
 async function getBalancesMap() {
-  const page = 1, pageSize = 200;
-  try {
-    const res = await gswap.assets.getUserAssets(WALLET, page, pageSize); // { tokens: [...] }
-    const map = {};
-    for (const t of (res.tokens || [])) {
-      const sym = (t.symbol || '').toUpperCase();    // e.g., GUSDT, GALA, GWETH
-      if (!sym) continue;
-      map[sym] = Number(t.quantity || '0');
+  const map = {};
+  let page = 1;
+  const pageSize = 100; // API requires 1..100
+
+  while (true) {
+    try {
+      const res = await gswap.assets.getUserAssets(WALLET, page, pageSize); // { tokens: [...] }
+      const tokens = res?.tokens || [];
+      for (const t of tokens) {
+        const sym = (t.symbol || '').toUpperCase(); // e.g., GUSDT, GUSDC, GALA, GWETH
+        if (!sym) continue;
+        map[sym] = Number(t.quantity || '0');
+      }
+      if (tokens.length < pageSize) break; // last page
+      page += 1;
+    } catch (e) {
+      console.log(`[BALANCE-ERR] ${e?.message || e}`);
+      break;
     }
-    return map;
-  } catch (e) {
-    console.log(`[BALANCE-ERR] ${e?.message || e}`);
-    return {}; // treat as no balances rather than crash
   }
+
+  if (DEBUG) {
+    console.log('[TOKENS]', Object.keys(map));
+    if (map.GUSDT != null) console.log('[GUSDT]', map.GUSDT);
+    if (map.GUSDC != null) console.log('[GUSDC]', map.GUSDC);
+  }
+  return map;
+}
+
+// Detect which stable the wallet actually has; prefer GUSDT if both
+function resolveStableFromBalances(balances) {
+  if (balances.GUSDT != null && balances.GUSDT > 0) {
+    return { sym: 'GUSDT', classKey: GUSDT, amount: Number(balances.GUSDT) };
+  }
+  if (balances.GUSDC != null && balances.GUSDC > 0) {
+    return { sym: 'GUSDC', classKey: GUSDC, amount: Number(balances.GUSDC) };
+  }
+  // If neither positive, still return “best known” so swaps can target the right class key
+  if (balances.GUSDT != null) return { sym: 'GUSDT', classKey: GUSDT, amount: Number(balances.GUSDT) };
+  if (balances.GUSDC != null) return { sym: 'GUSDC', classKey: GUSDC, amount: Number(balances.GUSDC) };
+  return { sym: null, classKey: null, amount: 0 };
 }
 
 // Safer quote wrapper (rejects 0/NaN, handles errors)
@@ -129,17 +161,20 @@ async function trySellIfProfitable(symbolKey) {
   }
 
   const IN  = symbolKey === 'GALA' ? GALA : GWETH;
-  const OUT = GUSDT;
+
+  // Choose stable out based on what you actually have on-chain (prefers GUSDT)
+  const stable = resolveStableFromBalances(balances);
+  const OUT = stable.classKey || GUSDT; // default GUSDT class key if unknown
 
   const q = await safeQuoteExactIn(IN, OUT, qty.toString());
   if (!q) {
-    console.log(`[SELL-SKIP] No valid quote for ${symbolKey}->GUSDT (qty=${qty})`);
+    console.log(`[SELL-SKIP] No valid quote for ${symbolKey}->${stable.sym || 'GUSDT'} (qty=${qty})`);
     return;
   }
 
   const usdcOutNum = Number(q.outTokenAmount.toString()); // name retained
   if (!(usdcOutNum > 0)) {
-    console.log(`[SELL-SKIP] Quote out=0 for ${symbolKey}->GUSDT`);
+    console.log(`[SELL-SKIP] Quote out=0 for ${symbolKey}->${stable.sym || 'GUSDT'}`);
     return;
   }
 
@@ -152,7 +187,7 @@ async function trySellIfProfitable(symbolKey) {
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
   if (DRY_RUN) {
-    console.log(`[SELL-DRY] ${symbolKey}->GUSDT qty=${qty} exp≈$${usdcOutNum.toFixed(6)} minOut=${minOut}`);
+    console.log(`[SELL-DRY] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} exp≈$${usdcOutNum.toFixed(6)} minOut=${minOut}`);
     return;
   }
 
@@ -165,7 +200,7 @@ async function trySellIfProfitable(symbolKey) {
     const receipt = await pending.wait(); // waits via event socket
     console.log('✅ SELL done:', { txId: receipt.txId, hash: receipt.transactionHash });
   } catch (e) {
-    console.log(`[SELL-ERR] ${symbolKey}->GUSDT ${e?.message || e}`);
+    console.log(`[SELL-ERR] ${symbolKey}->${stable.sym || 'GUSDT'} ${e?.message || e}`);
   }
 }
 
@@ -177,26 +212,31 @@ async function buyOneDollar() {
   }
 
   const balances = await getBalancesMap();
-  const gusdcBal = Number(balances.GUSDT || 0); // var name kept, but now reading GUSDT
-  if (gusdcBal + 1e-9 < usd) {
-    console.log(`[BUY-SKIP] Not enough GUSDT (need $${usd}, have $${gusdcBal})`);
+  const stable = resolveStableFromBalances(balances);
+
+  if (!stable.sym) {
+    console.log('[BUY-SKIP] No GUSDT/GUSDC balance detected');
+    return;
+  }
+  if (stable.amount + 1e-9 < usd) {
+    console.log(`[BUY-SKIP] Not enough ${stable.sym} (need $${usd}, have $${stable.amount})`);
     return;
   }
 
   const buyKey = nextBuyTokenKey();         // 'GALA' or 'GWETH'
-  const IN  = GUSDT;
+  const IN  = stable.classKey;
   const OUT = buyKey === 'GALA' ? GALA : GWETH;
 
   const q = await safeQuoteExactIn(IN, OUT, usd.toString());
   if (!q) {
-    console.log(`[BUY-SKIP] No valid quote for GUSDT->${buyKey} (usd=${usd})`);
+    console.log(`[BUY-SKIP] No valid quote for ${stable.sym}->${buyKey} (usd=${usd})`);
     return;
   }
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
 
   if (DRY_RUN) {
-    console.log(`[BUY-DRY] GUSDT->${buyKey} spend=$${usd} feeTier=${q.feeTier} minOut=${minOut}`);
+    console.log(`[BUY-DRY] ${stable.sym}->${buyKey} spend=$${usd} feeTier=${q.feeTier} minOut=${minOut}`);
     return;
   }
 
@@ -209,7 +249,7 @@ async function buyOneDollar() {
     const receipt = await pending.wait();
     console.log('✅ BUY done:', { txId: receipt.txId, hash: receipt.transactionHash });
   } catch (e) {
-    console.log(`[BUY-ERR] GUSDT->${buyKey} ${e?.message || e}`);
+    console.log(`[BUY-ERR] ${stable.sym}->${buyKey} ${e?.message || e}`);
   }
 }
 
