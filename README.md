@@ -42,37 +42,40 @@ API base: https://itsgoodtothink.com/.netlify/functions/sidecar
       POST /swap → executes a swap (requires PRIVATE_KEY)
 
 # Bot Strategy (hourly)
+Flip-Flop Micro-Trader on GalaSwap
 
-   Signals
-   
-      EMA filter — smooths price input (parameter: EMA_ALPHA)
-      Momentum — trade with the drift if abs Δp > MOMENTUM_TH
-      Mean Reversion — fade the move if |price − EMA| > MEANREV_TH
-      (Optional) Route Arbitrage — probe fixed route (e.g., USDC→GALA→WETH→USDC) and act if expected P&L > ARB_MIN_PROFIT_BPS
+This bot is designed to run continuously on GitHub Actions every 10 minutes. Its core strategy is simple but systematic:
 
-   Risk & execution
-   
-      Trade sizing: BASE_TRADE_USD up to MAX_TRADE_USD
-      Slippage cap: SLIPPAGE_BPS (e.g., 50 = 0.50%)
-      Dry-run: set DRY_RUN=true to simulate without sending
-      Quote first, then commit: use GalaSwap quotes, verify price impact ≤ cap, then submit
+Profit-taking sells
 
-# Pseudocode
-every hour:
+      At the start of each tick, the bot checks whether it holds GALA or GWETH (wrapped ETH on GalaChain).
+      If it does, it requests a live swap quote from GalaSwap to convert the entire balance back into GUSDC            (GalaChain USDC).
 
-     p = quoted prices (GALA->USDC, WETH->USDC)
-     ema = update_ema(p, EMA_ALPHA)
-     mom = (p - p_prev)/p_prev
-     dev = (p - ema)/ema
+      If the output would return more than the bot’s assumed cost basis (~$1 per previous buy) plus a profit           threshold (default 0.1%, configurable with MIN_PROFIT_BPS), it executes the swap and realizes the profit.
 
-     if |mom| > MOMENTUM_TH:   direction = sign(mom)
-     else if |dev| > MEANREV_TH: direction = -sign(dev)
-     else: skip
+      If not profitable, the bot skips and holds the token for another round.
 
-     size = clamp(BASE_TRADE_USD, MAX_TRADE_USD)
-     quote path for 'direction', check price_impact <= SLIPPAGE_BPS
-     if ok and not DRY_RUN: POST /swap
-     record snapshot
+Alternating buys
+
+      After checking for sells, the bot always spends a small, fixed amount of GUSDC (default $1, configurable          via BOT_USD_CENTS).
+
+      It alternates what it buys each cycle:
+
+      Even time slots → buy GALA
+
+      Odd time slots → buy GWETH
+
+      This creates a “flip-flop” rhythm, diversifying between the two assets and generating opportunities to           later sell them back if profitable.
+
+Risk management & safety
+
+      The bot never crashes if balances are missing — if the wallet has no USDC, no GALA, or no GWETH, the tick         just logs a [...-SKIP] message and exits successfully.
+
+      Slippage is capped (default 0.5%, via SLIPPAGE_BPS) so swaps won’t execute at poor prices.
+
+      A DRY_RUN mode lets you test the flow without sending real trades.
+
+      The workflow is stateless — every 10-minute run is independent, so if GitHub skips a run or the VM resets,       the bot continues normally on the next tick.
 
 # Environment Variables
 
