@@ -152,19 +152,19 @@
         const j=await r.json(); const arr=Array.isArray(j.tokens)?j.tokens:[];
         const map=new Map(arr.map(t=>[String(t.symbol).toUpperCase(),String(t.quantity)]));
         const qUSDC=map.get('GUSDC'); const qGALA=map.get('GALA'); const qWETH=map.get('GWETH');
-        bUSDC.textContent=qUSDC??'N/A'; bGALA.textContent=qGALA??'N/A'; bETH.textContent=qWETH??'N/A';
+        bUSDC.textContent=qUSDC??'...'; bGALA.textContent=qGALA??'...'; bETH.textContent=qWETH??'...';
         lastBalances={ GUSDC:qUSDC!=null?toNum(qUSDC):null, GALA:qGALA!=null?toNum(qGALA):null, GWETH:qWETH!=null?toNum(qWETH):null };
         const total=(lastBalances.GUSDC??0)+(lastBalances.GALA??0)*(latestPrices.GALA||0)+(lastBalances.GWETH??0)*(latestPrices.ETH||0);
-        bTOTAL.textContent=isNaN(total)?'N/A':fmtUSD(total);
+        bTOTAL.textContent=isNaN(total)?'...':fmtUSD(total);
 
         if(Number.isFinite(total)){
           const pnl=total-STARTING_USD;
           bPNL.textContent=`${fmtPNL(pnl)} (${((pnl/STARTING_USD)*100).toFixed(2)}%)`;
           colorPNL(bPNL,pnl);
         } else {
-          bPNL.textContent='N/A'; colorPNL(bPNL,0);
+          bPNL.textContent='...'; colorPNL(bPNL,0);
         }
-      } catch(e){console.error(e); bUSDC.textContent=bGALA.textContent=bETH.textContent=bTOTAL.textContent='N/A';}
+      } catch(e){console.error(e); bUSDC.textContent=bGALA.textContent=bETH.textContent=bTOTAL.textContent='...';}
     }
 
     async function refreshAll(){ await fetchPrices(); await fetchBalances(); }
