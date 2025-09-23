@@ -12,9 +12,8 @@ API base: https://itsgoodtothink.com/.netlify/functions/sidecar
 
    Tracks GUSDC / GALA / GWETH balances.
    Quotes live prices via GalaSwap (GALA→USDC, WETH→USDC).
-   Logs swaps and shows after-trade balances and a total value for each transaction.
-   Resolves real on-chain timestamps for swaps when a txId is available.
-   (Optional) Executes swaps with a private key (bot mode).
+   show profit and loss 
+   Executes swaps with a private key (bot mode).
 
 # Intended Use
 
@@ -95,22 +94,6 @@ Optional (defaults are sane)
       EXPLORER_CHANNELS=asset,dex
       EXPLORER_LOOKBACK=1500
 
-
-      Bot tuning (for your scheduled runner)
-
-      BOT_INTERVAL_MIN=60
-      DRY_RUN=false
-      SLIPPAGE_BPS=50
-      BASE_TRADE_USD=2
-      MAX_TRADE_USD=25
-
-      EMA_ALPHA=0.2
-      MOMENTUM_TH=0.004
-      MEANREV_TH=0.006
-
-      ARB_PATH=USDC-GALA-WETH-USDC
-      ARB_START_USD=3
-      ARB_MIN_PROFIT_BPS=30
 
 # Local Dev
       npm i -g netlify-cli
