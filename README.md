@@ -41,7 +41,7 @@ API base: https://itsgoodtothink.com/.netlify/functions/sidecar
       GET /tx-time?txId=... → on-chain timestamp lookup
       POST /swap → executes a swap (requires PRIVATE_KEY)
 
-# Bot Strategy (hourly)
+# Bot Strategy 
 Flip-Flop Micro-Trader on GalaSwap
 
 This bot is designed to run continuously on GitHub Actions every 10 minutes. Its core strategy is simple but systematic:
