@@ -2,33 +2,38 @@ name: gala-hackathon-bot
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
-  workflow_dispatch: {}
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in DRY_RUN mode (no live trades)"
+        type: choice
+        required: true
+        default: "true"
+        options: ["true","false"]
 
 permissions:
   contents: read
 
 env:
-  # ===== DEX backend base =====
   API_BASE: https://dex-backend-test1.defi.gala.com
 
   # ===== Base DCA strategy =====
-  DCA_USD_PER_ASSET: "5"        # $5 GALA + $5 GWETH each cycle
-  BASE_TP_PCT: "0.4"            # take-profit once price >= entry * (1 + 0.004) = +0.4%
+  DCA_USD_PER_ASSET: "5"
+  BASE_TP_PCT: "0.4"
 
   # ===== Arbitrage strategy =====
-  MIN_PROFIT_PCT: "0.8"         # execute loop if >= +0.8% expected
-  STRONG_SIGNAL_PCT: "1.6"      # size up to $30 if >= +1.6%
+  MIN_PROFIT_PCT: "0.8"
+  STRONG_SIGNAL_PCT: "1.6"
   ARB_MIN_USD: "5"
   ARB_MAX_USD: "30"
 
   # ===== Safety / execution =====
-  DEFAULT_FEE_TIER: "3000"      # 0.30% pool fee (adjust if your pools differ)
-  SLIPPAGE_PCT: "0.6"           # min-out guard per swap leg
-  MAX_POSITION_USD_PER_TOKEN: "150"  # cap inventory per asset (GALA/GWETH)
-  MAX_NET_EXPOSURE_USD: "300"        # cap total inventory across both
-  CIRCUIT_BREAKER_MAX_FAILS: "4"     # stop submitting swaps this run after N errors
-  DRY_RUN: "false"                # flip to "false" after testing
+  DEFAULT_FEE_TIER: "3000"
+  SLIPPAGE_PCT: "0.6"
+  MAX_POSITION_USD_PER_TOKEN: "150"
+  MAX_NET_EXPOSURE_USD: "300"
+  CIRCUIT_BREAKER_MAX_FAILS: "4"
 
   # ===== Token composite keys (GalaChain) =====
   T_GUSDC: "GUSDC$Unit$none$none"
@@ -45,7 +50,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .bot-state
-          key: bot-state-v2
+          key: bot-state-v3         # stable key for restore
+          restore-keys: |
+            bot-state-
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -57,10 +64,20 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm i @gala-chain/api
 
+      - name: Prepare folders & placeholder logs
+        run: |
+          mkdir -p .bot-state .bot-logs
+          [ -f .bot-state/state.json ] || echo '{"positions":{"GALA":{"qty":0,"avg":0},"GWETH":{"qty":0,"avg":0}},"pnl":{"realized_usdc":0,"cycles":0,"wins":0,"losses":0}}' > .bot-state/state.json
+          # placeholder files so artifact upload never fails even if the bot crashes early
+          echo "timestamp,type,token,side,usd,token_qty,price_usd,txid_or_key,notes" > .bot-logs/placeholder.csv
+          echo '{"status":"init"}' > .bot-logs/placeholder.json
+
       - name: Run bot
         env:
           WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
           PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}
+          # pick DRY_RUN from workflow input (falls back to true on schedule)
+          DRY_RUN: ${{ inputs.dry_run || 'true' }}
         run: |
           node - <<'NODE'
           import fs from "node:fs";
@@ -71,19 +88,19 @@ jobs:
           // ===== Config & helpers =====
           const API_BASE = process.env.API_BASE;
           const DRY_RUN  = (process.env.DRY_RUN || "true").toLowerCase()==="true";
-          const WALLET   = process.env.WALLET_ADDRESS;     // "eth|0x...."
-          const PRIVKEY  = process.env.PRIVATE_KEY;        // "0x...."
+          const WALLET   = process.env.WALLET_ADDRESS;
+          const PRIVKEY  = process.env.PRIVATE_KEY;
 
-          const DCA_USD       = num(process.env.DCA_USD_PER_ASSET || "5");
-          const BASE_TP       = num(process.env.BASE_TP_PCT || "0.4")/100;
-          const MIN_PROFIT    = num(process.env.MIN_PROFIT_PCT || "0.8")/100;
-          const STRONG_SIG    = num(process.env.STRONG_SIGNAL_PCT || "1.6")/100;
-          const ARB_MIN_USD   = num(process.env.ARB_MIN_USD || "5");
-          const ARB_MAX_USD   = num(process.env.ARB_MAX_USD || "30");
+          const DCA_USD       = N(process.env.DCA_USD_PER_ASSET || "5");
+          const BASE_TP       = N(process.env.BASE_TP_PCT || "0.4")/100;
+          const MIN_PROFIT    = N(process.env.MIN_PROFIT_PCT || "0.8")/100;
+          const STRONG_SIG    = N(process.env.STRONG_SIGNAL_PCT || "1.6")/100;
+          const ARB_MIN_USD   = N(process.env.ARB_MIN_USD || "5");
+          const ARB_MAX_USD   = N(process.env.ARB_MAX_USD || "30");
           const FEE_TIER      = parseInt(process.env.DEFAULT_FEE_TIER || "3000",10);
-          const SLIP          = num(process.env.SLIPPAGE_PCT || "0.6")/100;
-          const MAX_POS_EACH  = num(process.env.MAX_POSITION_USD_PER_TOKEN || "150");
-          const MAX_POS_NET   = num(process.env.MAX_NET_EXPOSURE_USD || "300");
+          const SLIP          = N(process.env.SLIPPAGE_PCT || "0.6")/100;
+          const MAX_POS_EACH  = N(process.env.MAX_POSITION_USD_PER_TOKEN || "150");
+          const MAX_POS_NET   = N(process.env.MAX_NET_EXPOSURE_USD || "300");
           const MAX_FAILS     = parseInt(process.env.CIRCUIT_BREAKER_MAX_FAILS || "4",10);
 
           const T = {
@@ -92,33 +109,24 @@ jobs:
             GWETH: process.env.T_GWETH
           };
 
-          function num(x){ return Number(x); }
-          if (!WALLET?.startsWith("eth|") || !PRIVKEY?.startsWith("0x")) {
-            throw new Error("Missing or malformed WALLET_ADDRESS / PRIVATE_KEY");
-          }
-
+          function N(x){ return Number(x); }
           const stateDir = ".bot-state";
           const statePath = path.join(stateDir, "state.json");
           const logDir = ".bot-logs";
-          const csvPath = path.join(logDir, `trades_${Date.now()}.csv`);
-          const jsonPath = path.join(logDir, `run_${Date.now()}.json`);
+          const runId = Date.now();
+          const csvPath = path.join(logDir, `trades_${runId}.csv`);
+          const jsonPath = path.join(logDir, `run_${runId}.json`);
 
-          fs.mkdirSync(stateDir, { recursive: true });
-          fs.mkdirSync(logDir, { recursive: true });
+          // always create a CSV for this run so artifacts exist even on failure
+          fs.writeFileSync(csvPath, "timestamp,type,token,side,usd,token_qty,price_usd,txid_or_key,notes\n", {flag:"a"});
 
           function loadState(){
             try { return JSON.parse(fs.readFileSync(statePath, "utf8")); }
-            catch {
-              return { positions: { GALA: { qty:0, avg:0 }, GWETH: { qty:0, avg:0 } },
-                       pnl: { realized_usdc:0, cycles:0, wins:0, losses:0 } };
-            }
+            catch { return { positions:{GALA:{qty:0,avg:0},GWETH:{qty:0,avg:0}}, pnl:{realized_usdc:0,cycles:0,wins:0,losses:0} }; }
           }
           function saveState(s){ fs.writeFileSync(statePath, JSON.stringify(s, null, 2)); }
-          function appendCSV(line){ fs.appendFileSync(csvPath, line + "\n"); }
-          async function delay(ms){ return new Promise(r=>setTimeout(r, ms)); }
-          async function jitter(){ const j = Math.floor(Math.random()*60000); await delay(j); } // ±60s
+          function logCSV(...cols){ fs.writeFileSync(csvPath, cols.join(",")+"\n", {flag:"a"}); }
 
-          // ===== HTTP helpers =====
           async function apiGet(path, params){
             const u = new URL(path, API_BASE);
             Object.entries(params||{}).forEach(([k,v])=>u.searchParams.set(k,String(v)));
@@ -135,30 +143,21 @@ jobs:
           async function price(tokenKey){
             const j = await apiGet("/v1/trade/price", { token: tokenKey });
             const p = j?.data?.price ?? j?.price;
-            return num(p);
+            return N(p);
           }
-          async function quote(tokenIn, tokenOut, amountIn, fee=FEE_TIER){
+          async function quote(tokenIn, tokenOut, amountIn, fee){
             const j = await apiGet("/v1/trade/quote", { tokenIn, tokenOut, amountIn, fee });
             const d = j.data || j;
-            return num(d.amountOut || 0);
+            return N(d.amountOut || 0);
           }
           async function getBalance(user, tokenKey){
-            // Balance endpoint — skips trades if not enough GUSDC
             const j = await apiGet("/v1/trade/balance", { user, token: tokenKey });
             const d = j.data || j;
-            return num(d.balance || 0);
+            return N(d.balance || 0);
           }
-          function toObj(k){ const [collection,category,type,additionalKey] = k.split("$"); return { collection, category, type, additionalKey }; }
-          async function swapPayload(tokenIn, tokenOut, amountIn, amountOutMin, fee=FEE_TIER){
-            const body = {
-              tokenIn: toObj(tokenIn),
-              tokenOut: toObj(tokenOut),
-              amountIn: String(amountIn),
-              fee,
-              sqrtPriceLimit: "0",
-              amountInMaximum: String(amountIn),
-              amountOutMinimum: String(Math.max(0, amountOutMin || 0))
-            };
+          function toObj(k){ const [collection,category,type,additionalKey]=k.split("$"); return {collection,category,type,additionalKey}; }
+          async function swapPayload(tokenIn, tokenOut, amountIn, amountOutMin, fee){
+            const body = { tokenIn: toObj(tokenIn), tokenOut: toObj(tokenOut), amountIn:String(amountIn), fee, sqrtPriceLimit:"0", amountInMaximum:String(amountIn), amountOutMinimum:String(Math.max(0, amountOutMin||0)) };
             const j = await apiPost("/v1/trade/swap", body);
             return j.data;
           }
@@ -167,7 +166,7 @@ jobs:
             const withKey = { ...payload, uniqueKey: payload.uniqueKey || `galaswap-operation-${crypto.randomUUID()}` };
             const signature = signatures.getSignature(withKey, key);
             const j = await apiPost("/v1/trade/bundle", { payload: withKey, type, signature, user: WALLET });
-            return j.data?.data || j.data; // tx id
+            return j.data?.data || j.data;
           }
           async function execSwap(tokenIn, tokenOut, amountIn, expectedOut){
             const minOut = expectedOut * (1 - SLIP);
@@ -176,150 +175,98 @@ jobs:
             const id = await bundle(payload, "swap");
             return { dry:false, id };
           }
-
-          function sizeForProfit(p){ return p >= STRONG_SIG ? ARB_MAX_USD : Math.round((ARB_MIN_USD + Math.random()*5)*100)/100; }
           function exposureUSD(state, galaPx, wethPx){
-            const galaUSD = state.positions.GALA.qty * galaPx;
-            const wethUSD = state.positions.GWETH.qty * wethPx;
-            return { galaUSD, wethUSD, net: galaUSD + wethUSD };
+            return { galaUSD: state.positions.GALA.qty * galaPx, wethUSD: state.positions.GWETH.qty * wethPx };
           }
-
           async function evalLoop(spend, seq){
-            let amt = spend; const legs = [];
-            for (let i=0;i<seq.length-1;i++){
-              const tin = T[seq[i]], tout = T[seq[i+1]];
-              const out = await quote(tin, tout, amt, FEE_TIER);
-              if (!out || out<=0) return { ok:false };
-              legs.push({ tokenIn: tin, tokenOut: tout, amountIn: amt, expectedOut: out });
-              amt = out;
+            let amt = spend; const legs=[];
+            for(let i=0;i<seq.length-1;i++){
+              const tin=T[seq[i]], tout=T[seq[i+1]];
+              const out=await quote(tin,tout,amt,FEE_TIER);
+              if(!out||out<=0) return {ok:false};
+              legs.push({tokenIn:tin,tokenOut:tout,amountIn:amt,expectedOut:out});
+              amt=out;
             }
-            const profitPct = (amt - spend)/spend;
-            return { ok:true, legs, profitPct, start: spend, final: amt, path: seq };
+            return {ok:true, legs, start:spend, final:amt, profitPct:(amt-spend)/spend, path:seq};
           }
 
           (async ()=>{
-            console.log("⏱️  Start cycle | DRY_RUN:", DRY_RUN, "|", new Date().toISOString());
-            await jitter();
+            // early format checks so we fail with a clear message but still write an artifact
+            if (!WALLET?.startsWith("eth|")) throw new Error("WALLET_ADDRESS must look like eth|0x...");
+            if (!PRIVKEY?.startsWith("0x")) throw new Error("PRIVATE_KEY must start with 0x...");
 
             const state = loadState();
-            fs.existsSync(csvPath) || appendCSV("timestamp,type,token,side,usd,token_qty,price_usd,txid_or_key,notes");
+            const [galaPx, gwethPx] = await Promise.all([ price(process.env.T_GALA), price(process.env.T_GWETH) ]);
+            const exp = exposureUSD(state, galaPx, gwethPx);
+            let gusdcBal = await getBalance(WALLET, process.env.T_GUSDC);
 
-            // Fetch prices
-            const [galaPx, gwethPx] = await Promise.all([ price(T.GALA), price(T.GWETH) ]);
             console.log(`💹 Prices → GALA=$${galaPx.toFixed(6)} | GWETH=$${gwethPx.toFixed(2)}`);
-
-            // Get current GUSDC balance ONCE and track available locally
-            let gusdcBal = await getBalance(WALLET, T.GUSDC);
             console.log(`💰 Balance GUSDC=${gusdcBal.toFixed(4)}`);
 
-            const exp = exposureUSD(state, galaPx, gwethPx);
-            const tooMuchNet = exp.net >= MAX_POS_NET;
-            const tooMuchGala = exp.galaUSD >= MAX_POS_EACH;
-            const tooMuchWeth = exp.wethUSD >= MAX_POS_EACH;
-            let fails = 0;
+            // take-profit first
+            const sellIfTP = async (sym, px)=>{
+              const pos = state.positions[sym]; if(!pos || pos.qty<=0) return;
+              const target = pos.avg*(1+BASE_TP);
+              if(px < target) return;
+              const maxSellUsd = Math.min(ARB_MAX_USD, pos.qty*px);
+              const sellQty = Math.min(pos.qty, maxSellUsd/px);
+              if(sellQty<=0) return;
+              const outUSDC = await quote(process.env[`T_${sym}`], process.env.T_GUSDC, sellQty, FEE_TIER);
+              const r = await execSwap(process.env[`T_${sym}`], process.env.T_GUSDC, sellQty, outUSDC);
+              state.positions[sym].qty -= sellQty;
+              if (state.positions[sym].qty <= 1e-12) state.positions[sym]={qty:0,avg:0};
+              state.pnl.realized_usdc += outUSDC - (sellQty*pos.avg);
+              logCSV(Date.now(),"tp",sym,"SELL",(sellQty*px).toFixed(2),sellQty.toFixed(8),px.toFixed(8),r.id,`tp>=${(BASE_TP*100).toFixed(2)}%`);
+              console.log(`🔵 TP SELL ${sym}: ~$${(sellQty*px).toFixed(2)} → ${r.id}`);
+            };
+            await sellIfTP("GALA", galaPx);
+            await sellIfTP("GWETH", gwethPx);
 
-            // Helper: check we have enough GUSDC before attempting a spend; reduce or skip
-            function planSpendUSD(desired){
-              const amt = Math.min(desired, gusdcBal);
-              if (amt < 1e-6) return 0;
-              gusdcBal -= amt;
-              return Math.round(amt*100)/100;
-            }
-
-            // ---- 1) Take-profit sells (sell winners first) ----
-            for (const sym of ["GALA","GWETH"]){
-              const pos = state.positions[sym]; if (!pos || pos.qty<=0) continue;
-              const px = sym==="GALA" ? galaPx : gwethPx;
-              const target = pos.avg * (1 + BASE_TP);
-              if (px >= target){
-                const maxSellUsd = Math.min(ARB_MAX_USD, pos.qty * px);
-                const sellQty = Math.min(pos.qty, maxSellUsd / px);
-                if (sellQty > 0){
-                  try{
-                    const outUSDC = await quote(T[sym], T.GUSDC, sellQty, FEE_TIER);
-                    const r = await execSwap(T[sym], T.GUSDC, sellQty, outUSDC);
-                    // Update position & realized PnL (approx using expectedOut)
-                    state.positions[sym].qty -= sellQty;
-                    if (state.positions[sym].qty <= 1e-12) { state.positions[sym] = { qty:0, avg:0 }; }
-                    state.pnl.realized_usdc += outUSDC - (sellQty * pos.avg);
-                    appendCSV(`${Date.now()},tp,${sym},SELL,${(sellQty*px).toFixed(2)},${sellQty.toFixed(8)},${px.toFixed(8)},${r.id},tp>=${(BASE_TP*100).toFixed(2)}%`);
-                    console.log(`🔵 TP SELL ${sym}: ~${(sellQty*px).toFixed(2)} → tx=${r.id}`);
-                  } catch(e){ console.log("sell error:", e.message); if(++fails>=MAX_FAILS) console.log("🛑 circuit breaker"); }
-                }
+            // DCA buys (respect exposure + balance)
+            const net = exp.galaUSD + exp.wethUSD;
+            const capOK = (net + 2*DCA_USD) <= MAX_POS_NET;
+            const buyOne = async (sym, px)=>{
+              if (!capOK) { console.log(`⛔ DCA ${sym} skipped due to net exposure cap`); return; }
+              const tokenPos = state.positions[sym];
+              if ((sym==="GALA" && exp.galaUSD>=MAX_POS_EACH) || (sym==="GWETH" && exp.wethUSD>=MAX_POS_EACH)) {
+                console.log(`⛔ DCA ${sym} skipped: per-token cap`); return;
               }
-            }
+              if (gusdcBal < DCA_USD) { console.log(`⛔ DCA ${sym} skipped: insufficient GUSDC`); return; }
+              const out = await quote(process.env.T_GUSDC, process.env[`T_${sym}`], DCA_USD, FEE_TIER);
+              const r = await execSwap(process.env.T_GUSDC, process.env[`T_${sym}`], DCA_USD, out);
+              const newQty = tokenPos.qty + out;
+              const newCost = (tokenPos.qty*tokenPos.avg + DCA_USD) / newQty;
+              state.positions[sym] = { qty:newQty, avg:newCost };
+              gusdcBal -= DCA_USD;
+              logCSV(Date.now(),"dca",sym,"BUY",DCA_USD.toFixed(2),out.toFixed(8),(DCA_USD/out).toFixed(8),r.id,"dca");
+              console.log(`🟢 DCA BUY ${sym} $${DCA_USD} → ${r.id}`);
+            };
+            await buyOne("GALA", galaPx);
+            await buyOne("GWETH", gwethPx);
 
-            // ---- 2) DCA buys ($5 GALA + $5 GWETH), guarded by balance and exposure ----
-            const boost = ((h)=> (h>=14 && h<=20) ? 1.2 : 1.0)(new Date().getUTCHours()); // mild “active hours” boost
-            const dcaEach = Math.max(1, Math.min(50, DCA_USD * boost)); // clamp
-
-            if (!tooMuchGala && exp.net + dcaEach <= MAX_POS_NET){
-              const spend = planSpendUSD(dcaEach);
-              if (spend > 0){
-                try{
-                  const outGala = await quote(T.GUSDC, T.GALA, spend, FEE_TIER);
-                  const r = await execSwap(T.GUSDC, T.GALA, spend, outGala);
-                  // Update avg entry
-                  const pos = state.positions.GALA;
-                  const newQty = pos.qty + outGala;
-                  const newCost = (pos.qty*pos.avg + spend) / newQty;
-                  state.positions.GALA = { qty:newQty, avg:newCost };
-                  appendCSV(`${Date.now()},dca,GALA,BUY,${spend.toFixed(2)},${outGala.toFixed(8)},${(spend/outGala).toFixed(8)},${r.id},dca`);
-                  console.log(`🟢 DCA BUY GALA $${spend} → tx=${r.id}`);
-                } catch(e){ console.log("dca GALA error:", e.message); if(++fails>=MAX_FAILS) console.log("🛑 circuit breaker"); }
-              } else {
-                console.log("⛔ DCA GALA skipped: insufficient GUSDC");
-              }
-            } else {
-              console.log("⛔ DCA GALA skipped due to exposure cap");
-            }
-
-            if (!tooMuchWeth && exp.net + dcaEach <= MAX_POS_NET){
-              const spend = planSpendUSD(dcaEach);
-              if (spend > 0){
-                try{
-                  const outWeth = await quote(T.GUSDC, T.GWETH, spend, FEE_TIER);
-                  const r = await execSwap(T.GUSDC, T.GWETH, spend, outWeth);
-                  const pos = state.positions.GWETH;
-                  const newQty = pos.qty + outWeth;
-                  const newCost = (pos.qty*pos.avg + spend) / newQty;
-                  state.positions.GWETH = { qty:newQty, avg:newCost };
-                  appendCSV(`${Date.now()},dca,GWETH,BUY,${spend.toFixed(2)},${outWeth.toFixed(8)},${(spend/outWeth).toFixed(8)},${r.id},dca`);
-                  console.log(`🟢 DCA BUY GWETH $${spend} → tx=${r.id}`);
-                } catch(e){ console.log("dca GWETH error:", e.message); if(++fails>=MAX_FAILS) console.log("🛑 circuit breaker"); }
-              } else {
-                console.log("⛔ DCA GWETH skipped: insufficient GUSDC");
-              }
-            } else {
-              console.log("⛔ DCA GWETH skipped due to exposure cap");
-            }
-
-            // ---- 3) Triangular arbitrage scan (guarded by remaining balance) ----
-            if (fails < MAX_FAILS){
+            // Triangular arb (respect remaining balance)
+            if (gusdcBal >= Math.min(1, ARB_MIN_USD)){
               const loops = [
                 ["GUSDC","GALA","GWETH","GUSDC"],
                 ["GUSDC","GWETH","GALA","GUSDC"]
               ];
-              let best = null;
-              for (const seq of loops){
+              let best=null;
+              for(const seq of loops){
                 const est = await evalLoop(Math.min(ARB_MIN_USD, gusdcBal), seq);
-                if (!est.ok) continue;
-                if (!best || est.profitPct > best.profitPct) best = est;
+                if(!est.ok) continue;
+                if(!best || est.profitPct>best.profitPct) best=est;
               }
-              if (best && best.profitPct >= MIN_PROFIT){
-                const desiredSize = sizeForProfit(best.profitPct);
-                const size = Math.min(desiredSize, gusdcBal);  // don’t overspend GUSDC
-                if (size >= 0.5){ // require at least 50¢ to avoid dust
-                  const finalCheck = await evalLoop(size, best.path);
-                  if (finalCheck.ok && finalCheck.profitPct >= MIN_PROFIT){
-                    console.log(`🎯 ARB ${finalCheck.path.join("→")} | $${size} | exp=${(finalCheck.profitPct*100).toFixed(3)}%`);
-                    for (const leg of finalCheck.legs){
-                      try{
-                        const r = await execSwap(leg.tokenIn, leg.tokenOut, leg.amountIn, leg.expectedOut);
-                        appendCSV(`${Date.now()},arb,NA,SWAP,${leg.amountIn.toFixed(6)},NA,NA,${r.id},${leg.tokenIn}->${leg.tokenOut}`);
-                      } catch(e){ console.log("arb leg error:", e.message); if(++fails>=MAX_FAILS){ console.log("🛑 circuit breaker"); break; } }
+              if(best && best.profitPct>=MIN_PROFIT){
+                const size = best.profitPct>=STRONG_SIG ? Math.min(ARB_MAX_USD, gusdcBal) : Math.min(Math.max(ARB_MIN_USD,5), gusdcBal);
+                if(size >= 0.5){
+                  const check = await evalLoop(size, best.path);
+                  if(check.ok && check.profitPct>=MIN_PROFIT){
+                    console.log(`🎯 ARB ${check.path.join("→")} | $${size} | exp=${(check.profitPct*100).toFixed(3)}%`);
+                    for(const leg of check.legs){
+                      const r = await execSwap(leg.tokenIn, leg.tokenOut, leg.amountIn, leg.expectedOut);
+                      logCSV(Date.now(),"arb","NA","SWAP",leg.amountIn.toFixed(6),"NA","NA",r.id,`${leg.tokenIn}->${leg.tokenOut}`);
                     }
-                    gusdcBal -= size; // conservatively decrement (start token)
+                    gusdcBal -= size;
                   } else {
                     console.log("⚖️  Arb signal faded at size");
                   }
@@ -329,23 +276,32 @@ jobs:
               } else {
                 console.log("😴 No arb ≥ MIN_PROFIT or insufficient balance");
               }
+            } else {
+              console.log("⛔ Skipping arb: not enough GUSDC");
             }
 
             state.pnl.cycles += 1;
             saveState(state);
-
-            // write JSON summary for artifact
             fs.writeFileSync(jsonPath, JSON.stringify({
               time: new Date().toISOString(),
               prices: { GALA: galaPx, GWETH: gwethPx },
               gusdcBalanceAfter: gusdcBal,
-              exposure: exp,
               pnl: state.pnl,
               dryRun: DRY_RUN
             }, null, 2));
 
-            console.log("✅ cycle done");
-          })().catch(e=>{ console.error("❌ bot error:", e); process.exit(1); });
+          })().catch(err=>{
+            // Write an error summary so you still get artifacts
+            const out = {
+              time: new Date().toISOString(),
+              error: String(err?.message || err),
+              stack: err?.stack || null,
+              hint: "Check secrets (WALLET_ADDRESS=eth|0x..., PRIVATE_KEY=0x...), API_BASE reachability, and token IDs."
+            };
+            fs.writeFileSync(path.join(".bot-logs", `run_error_${Date.now()}.json`), JSON.stringify(out,null,2));
+            console.error("❌ bot error:", err);
+            process.exit(1);
+          });
           NODE
 
       - name: Upload logs (artifact)
@@ -356,10 +312,12 @@ jobs:
           path: |
             .bot-logs/*.csv
             .bot-logs/*.json
+          if-no-files-found: ignore
 
       - name: Save state cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .bot-state
-          key: bot-state-v2
+          # use a unique key per run -> avoids "Cache save failed"
+          key: bot-state-v3-${{ github.run_id }}
