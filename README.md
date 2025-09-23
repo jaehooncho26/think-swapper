@@ -96,22 +96,6 @@ Optional (defaults are sane)
       EXPLORER_LOOKBACK=1500
 
 
-      Bot tuning (for your scheduled runner)
-
-      BOT_INTERVAL_MIN=60
-      DRY_RUN=false
-      SLIPPAGE_BPS=50
-      BASE_TRADE_USD=2
-      MAX_TRADE_USD=25
-
-      EMA_ALPHA=0.2
-      MOMENTUM_TH=0.004
-      MEANREV_TH=0.006
-
-      ARB_PATH=USDC-GALA-WETH-USDC
-      ARB_START_USD=3
-      ARB_MIN_PROFIT_BPS=30
-
 # Local Dev
       npm i -g netlify-cli
       netlify dev
