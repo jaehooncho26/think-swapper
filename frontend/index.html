@@ -48,8 +48,6 @@
     .link-row { display:flex; justify-content:center; }
     .pill-link { text-decoration:none; color:#000000; }
     .pill-link:hover { filter:brightness(0.95); }
-
-
   </style>
 </head>
 <body>
@@ -61,7 +59,7 @@
   <div class="wrap">
     <!-- Prices -->
     <div class="grid g3" style="margin-top:14px;">
-      <div class="card"><div class="text-value-pair"><img src="usdclogo.png" style="height:40px"><div class="muted">USDC:</div><div id="pUSDC" class="pill">—</div></div></div>
+      <div class="card"><div class="text-value-pair"><img src="usdtlogo.png" style="height:40px"><div class="muted">USDT:</div><div id="pUSDT" class="pill">—</div></div></div>
       <div class="card"><div class="text-value-pair"><img src="galalogo.png" style="height:40px"><div class="muted">GALA:</div><div id="pGALA" class="pill">—</div></div></div>
       <div class="card"><div class="text-value-pair"><img src="ethlogo.png" style="height:40px"><div class="muted">ETH:</div><div id="pETH" class="pill">—</div></div></div>
     </div>
@@ -70,7 +68,7 @@
 
     <!-- Balances -->
     <div class="grid g3" style="margin-top:14px;">
-      <div class="card"><div class="text-value-pair"><img src="usdclogo.png" style="height:40px"><div class="muted">USDC:</div><div id="bUSDC" class="pill">N/A</div></div></div>
+      <div class="card"><div class="text-value-pair"><img src="usdtlogo.png" style="height:40px"><div class="muted">USDT:</div><div id="bUSDT" class="pill">N/A</div></div></div>
       <div class="card"><div class="text-value-pair"><img src="galalogo.png" style="height:40px"><div class="muted">GALA:</div><div id="bGALA" class="pill">N/A</div></div></div>
       <div class="card"><div class="text-value-pair"><img src="ethlogo.png" style="height:40px"><div class="muted">ETH:</div><div id="bETH" class="pill">N/A</div></div></div>
     </div>
@@ -98,7 +96,6 @@
             View full history on GalaScan →
           </a>
         </div>
-        
       </div>
       <div id="txNote" class="tx-note">Live history coming soon.</div>
     </div>
@@ -108,14 +105,14 @@
     const API_BASE = '/.netlify/functions/sidecar';
     const $ = id => document.getElementById(id);
 
-    const pGALA=$('pGALA'), pUSDC=$('pUSDC'), pETH=$('pETH');
-    const bUSDC=$('bUSDC'), bGALA=$('bGALA'), bETH=$('bETH'), bTOTAL=$('bTOTAL'), bPNL=$('bPNL');
+    const pGALA=$('pGALA'), pUSDT=$('pUSDT'), pETH=$('pETH');
+    const bUSDT=$('bUSDT'), bGALA=$('bGALA'), bETH=$('bETH'), bTOTAL=$('bTOTAL'), bPNL=$('bPNL');
 
     const fmtUSD = (n) => isFinite(n) ? '$'+n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:6}) : '—';
     const toNum = (v) => { const n=Number(v); return isFinite(n)?n:0; };
 
-    let latestPrices = { GALA:null, ETH:null, USDC:1 };
-    let lastBalances = { GUSDC:null, GALA:null, GWETH:null };
+    let latestPrices = { GALA:null, ETH:null, USDT:1 };
+    let lastBalances = { GUSDT:null, GALA:null, GWETH:null };
 
     // ==== P&L baseline ====
     const PNL_KEY = 'pnlBaselineUSD';
@@ -139,9 +136,9 @@
       try {
         const r=await fetch(`${API_BASE}/prices`); if(!r.ok)throw new Error();
         const j=await r.json(); const P=j.prices||{};
-        latestPrices={ GALA:toNum(P.GALA), ETH:toNum(P.ETH), USDC:toNum(P.USDC)||1 };
+        latestPrices={ GALA:toNum(P.GALA), ETH:toNum(P.ETH), USDT:toNum(P.USDT)||1 };
         pGALA.textContent=fmtUSD(latestPrices.GALA);
-        pUSDC.textContent=fmtUSD(latestPrices.USDC);
+        pUSDT.textContent=fmtUSD(latestPrices.USDT);
         pETH.textContent=fmtUSD(latestPrices.ETH);
       } catch(e){console.error(e);}
     }
@@ -151,10 +148,10 @@
         const r=await fetch(`${API_BASE}/assets`); if(!r.ok)throw new Error();
         const j=await r.json(); const arr=Array.isArray(j.tokens)?j.tokens:[];
         const map=new Map(arr.map(t=>[String(t.symbol).toUpperCase(),String(t.quantity)]));
-        const qUSDC=map.get('GUSDC'); const qGALA=map.get('GALA'); const qWETH=map.get('GWETH');
-        bUSDC.textContent=qUSDC??'...'; bGALA.textContent=qGALA??'...'; bETH.textContent=qWETH??'...';
-        lastBalances={ GUSDC:qUSDC!=null?toNum(qUSDC):null, GALA:qGALA!=null?toNum(qGALA):null, GWETH:qWETH!=null?toNum(qWETH):null };
-        const total=(lastBalances.GUSDC??0)+(lastBalances.GALA??0)*(latestPrices.GALA||0)+(lastBalances.GWETH??0)*(latestPrices.ETH||0);
+        const qUSDT=map.get('GUSDT'); const qGALA=map.get('GALA'); const qWETH=map.get('GWETH');
+        bUSDT.textContent=qUSDT??'...'; bGALA.textContent=qGALA??'...'; bETH.textContent=qWETH??'...';
+        lastBalances={ GUSDT:qUSDT!=null?toNum(qUSDT):null, GALA:qGALA!=null?toNum(qGALA):null, GWETH:qWETH!=null?toNum(qWETH):null };
+        const total=(lastBalances.GUSDT??0)+(lastBalances.GALA??0)*(latestPrices.GALA||0)+(lastBalances.GWETH??0)*(latestPrices.ETH||0);
         bTOTAL.textContent=isNaN(total)?'...':fmtUSD(total);
 
         if(Number.isFinite(total)){
@@ -164,7 +161,7 @@
         } else {
           bPNL.textContent='...'; colorPNL(bPNL,0);
         }
-      } catch(e){console.error(e); bUSDC.textContent=bGALA.textContent=bETH.textContent=bTOTAL.textContent='...';}
+      } catch(e){console.error(e); bUSDT.textContent=bGALA.textContent=bETH.textContent=bTOTAL.textContent='...';}
     }
 
     async function refreshAll(){ await fetchPrices(); await fetchBalances(); }

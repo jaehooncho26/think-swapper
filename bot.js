@@ -1,7 +1,7 @@
 // bot.js
 // Flip–Flop bot for GalaSwap using @gala-chain/gswap-sdk
 // Every tick (10m via GitHub Actions):
-// 1) Try to SELL GALA->GUSDC and GWETH->GUSDC if profitable vs ~$1 basis
+// 1) Try to SELL GALA->GUSDT and GWETH->GUSDT if profitable vs ~$1 basis
 // 2) BUY ~$1 of GALA (even slots) or GWETH (odd slots)
 // Safe for zero balances and bad quotes; supports DRY_RUN and one-shot mode (`node bot.js once`)
 
@@ -25,10 +25,10 @@ const bundlerBaseUrl    = process.env.BUNDLER_BASE_URL;
 const dexBackendBaseUrl = process.env.DEX_BACKEND_BASE_URL || undefined;
 
 // GalaChain token class keys (G = GalaChain-wrapped)
-// Note: "GUSDC" is USDC on GalaChain; "GWETH" is ETH on GalaChain.
+// Note: "GUSDT" is USDT on GalaChain; "GWETH" is ETH on GalaChain.
 const GALA   = 'GALA|Unit|none|none';
 const GWETH  = 'GWETH|Unit|none|none';
-const GUSDC  = 'GUSDC|Unit|none|none';
+const GUSDT  = 'GUSDT|Unit|none|none';
 
 // -----------------------------
 // Basic validation
@@ -74,7 +74,7 @@ function bpsMulStr(xStr, bps) {
   const x = Number(xStr);
   return ((x * (10000 - bps)) / 10000).toString();
 }
-function gainBps(inUSDC, outUSDC) {
+function gainBps(inUSDC, outUSDC) { // keeping variable names unchanged to minimize diffs
   return ((outUSDC - inUSDC) / Math.max(0.000001, inUSDC)) * 10000;
 }
 
@@ -90,7 +90,7 @@ async function getBalancesMap() {
     const res = await gswap.assets.getUserAssets(WALLET, page, pageSize); // { tokens: [...] }
     const map = {};
     for (const t of (res.tokens || [])) {
-      const sym = (t.symbol || '').toUpperCase();    // e.g., GUSDC, GALA, GWETH
+      const sym = (t.symbol || '').toUpperCase();    // e.g., GUSDT, GALA, GWETH
       if (!sym) continue;
       map[sym] = Number(t.quantity || '0');
     }
@@ -129,17 +129,17 @@ async function trySellIfProfitable(symbolKey) {
   }
 
   const IN  = symbolKey === 'GALA' ? GALA : GWETH;
-  const OUT = GUSDC;
+  const OUT = GUSDT;
 
   const q = await safeQuoteExactIn(IN, OUT, qty.toString());
   if (!q) {
-    console.log(`[SELL-SKIP] No valid quote for ${symbolKey}->GUSDC (qty=${qty})`);
+    console.log(`[SELL-SKIP] No valid quote for ${symbolKey}->GUSDT (qty=${qty})`);
     return;
   }
 
-  const usdcOutNum = Number(q.outTokenAmount.toString());
+  const usdcOutNum = Number(q.outTokenAmount.toString()); // name retained
   if (!(usdcOutNum > 0)) {
-    console.log(`[SELL-SKIP] Quote out=0 for ${symbolKey}->GUSDC`);
+    console.log(`[SELL-SKIP] Quote out=0 for ${symbolKey}->GUSDT`);
     return;
   }
 
@@ -152,7 +152,7 @@ async function trySellIfProfitable(symbolKey) {
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
   if (DRY_RUN) {
-    console.log(`[SELL-DRY] ${symbolKey}->GUSDC qty=${qty} exp≈$${usdcOutNum.toFixed(6)} minOut=${minOut}`);
+    console.log(`[SELL-DRY] ${symbolKey}->GUSDT qty=${qty} exp≈$${usdcOutNum.toFixed(6)} minOut=${minOut}`);
     return;
   }
 
@@ -165,7 +165,7 @@ async function trySellIfProfitable(symbolKey) {
     const receipt = await pending.wait(); // waits via event socket
     console.log('✅ SELL done:', { txId: receipt.txId, hash: receipt.transactionHash });
   } catch (e) {
-    console.log(`[SELL-ERR] ${symbolKey}->GUSDC ${e?.message || e}`);
+    console.log(`[SELL-ERR] ${symbolKey}->GUSDT ${e?.message || e}`);
   }
 }
 
@@ -177,26 +177,26 @@ async function buyOneDollar() {
   }
 
   const balances = await getBalancesMap();
-  const gusdcBal = Number(balances.GUSDC || 0);
+  const gusdcBal = Number(balances.GUSDT || 0); // var name kept, but now reading GUSDT
   if (gusdcBal + 1e-9 < usd) {
-    console.log(`[BUY-SKIP] Not enough GUSDC (need $${usd}, have $${gusdcBal})`);
+    console.log(`[BUY-SKIP] Not enough GUSDT (need $${usd}, have $${gusdcBal})`);
     return;
   }
 
   const buyKey = nextBuyTokenKey();         // 'GALA' or 'GWETH'
-  const IN  = GUSDC;
+  const IN  = GUSDT;
   const OUT = buyKey === 'GALA' ? GALA : GWETH;
 
   const q = await safeQuoteExactIn(IN, OUT, usd.toString());
   if (!q) {
-    console.log(`[BUY-SKIP] No valid quote for GUSDC->${buyKey} (usd=${usd})`);
+    console.log(`[BUY-SKIP] No valid quote for GUSDT->${buyKey} (usd=${usd})`);
     return;
   }
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
 
   if (DRY_RUN) {
-    console.log(`[BUY-DRY] GUSDC->${buyKey} spend=$${usd} feeTier=${q.feeTier} minOut=${minOut}`);
+    console.log(`[BUY-DRY] GUSDT->${buyKey} spend=$${usd} feeTier=${q.feeTier} minOut=${minOut}`);
     return;
   }
 
@@ -209,7 +209,7 @@ async function buyOneDollar() {
     const receipt = await pending.wait();
     console.log('✅ BUY done:', { txId: receipt.txId, hash: receipt.transactionHash });
   } catch (e) {
-    console.log(`[BUY-ERR] GUSDC->${buyKey} ${e?.message || e}`);
+    console.log(`[BUY-ERR] GUSDT->${buyKey} ${e?.message || e}`);
   }
 }
 
