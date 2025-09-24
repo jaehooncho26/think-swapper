@@ -1,8 +1,8 @@
 // bot.cjs
 // Flip–Flop bot for GalaSwap using @gala-chain/gswap-sdk
-// - Robust balances loader
 // - GUSDT/GUSDC auto-detect
-// - Tunable slippage & wait timeout
+// - Robust balances loader
+// - Tunable slippage & TX wait
 // - One-shot mode: `node bot.cjs once`
 
 require('dotenv').config();
@@ -14,13 +14,14 @@ const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
 const WALLET        = (process.env.WALLET_ADDRESS || '').trim();     // e.g., "eth|0x..."
 const PRIVATE_KEY   = (process.env.PRIVATE_KEY || '').trim();        // 0x...
 const DRY_RUN       = ((process.env.DRY_RUN || 'true').toLowerCase() === 'true');
-const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);      // $1 default
-const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 100)); // try 100–200 when testing
-const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10));
-const DEBUG         = ((process.env.DEBUG || 'false').toLowerCase() === 'true');
-const TX_WAIT_MS    = Math.max(60000, Number(process.env.TX_WAIT_MS || 600000)); // default 10m
 
-// Optional endpoints (pin if needed)
+const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);      // e.g., 100 = $1
+const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 200));  // try 150–200 while testing
+const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10)); // sell filter (0.10%)
+const TX_WAIT_MS    = Math.max(60000, Number(process.env.TX_WAIT_MS || 180000)); // 60s min; default 3m
+const DEBUG         = ((process.env.DEBUG || 'false').toLowerCase() === 'true');
+
+// Optional: pin production endpoints via env (recommended while debugging)
 const gatewayBaseUrl    = process.env.GATEWAY_BASE_URL;
 const bundlerBaseUrl    = process.env.BUNDLER_BASE_URL;
 const dexBackendBaseUrl = process.env.DEX_BACKEND_BASE_URL || undefined;
@@ -52,7 +53,7 @@ const gswap = new GSwap({
   gatewayBaseUrl,
   bundlerBaseUrl,
   dexBackendBaseUrl,
-  transactionWaitTimeoutMs: TX_WAIT_MS
+  transactionWaitTimeoutMs: TX_WAIT_MS,
 });
 
 if (DEBUG) {
@@ -68,6 +69,7 @@ function toDollars(cents) { return Math.max(0, Number(cents || 0)) / 100; }
 function isPositiveAmount(xStr) { const n = Number(xStr); return Number.isFinite(n) && n > 0; }
 function bpsMulStr(xStr, bps){ const x=Number(xStr); return ((x*(10000-bps))/10000).toString(); }
 function gainBps(inUSDC, outUSDC){ return ((outUSDC - inUSDC) / Math.max(1e-6, inUSDC)) * 10000; }
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 async function ensureSocket(){ if (!GSwap.events.eventSocketConnected()) { await GSwap.events.connectEventSocket(); } }
 
 // -------- Balances (robust attempts) --------
@@ -95,7 +97,7 @@ async function getBalancesMap() {
     { start: 1, limit: 100 },
     { start: 1, limit: 50 },
     { start: 0, limit: 100 },
-    { start: 0, limit: 50 }
+    { start: 0, limit: 50 },
   ];
 
   for (const { start, limit } of attempts) {
@@ -194,50 +196,82 @@ async function buyOneDollar() {
   const usd = toDollars(USD_CENTS);
   if (!(usd > 0)) { console.log('[BUY-SKIP] USD amount <= 0'); return; }
 
-  const balances = await getBalancesMap();
-  const stable = resolveStableFromBalances(balances);
+  // Read balances up-front so we can verify if the swap landed later
+  const balancesBefore = await getBalancesMap();
+  const stable = resolveStableFromBalances(balancesBefore);
   if (!stable.sym) { console.log('[BUY-SKIP] No GUSDT/GUSDC balance detected'); return; }
   if (stable.amount + 1e-9 < usd) { console.log(`[BUY-SKIP] Not enough ${stable.sym} (need $${usd}, have $${stable.amount})`); return; }
 
-  const buyKey = nextBuyTokenKey();       // 'GALA' or 'GWETH'
+  const buyKey = nextBuyTokenKey();              // 'GALA' or 'GWETH'
   const OUT = buyKey === 'GALA' ? GALA : GWETH;
 
+  // Quote (decides feeTier) + minOut
   const q = await safeQuoteExactIn(stable.classKey, OUT, usd.toString());
   if (!q) { console.log(`[BUY-SKIP] No valid quote for ${stable.sym}->${buyKey} (usd=${usd}).`); return; }
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
-  if (DEBUG) console.log(`[BUY-QUOTE] ${stable.sym}->${buyKey} $${usd} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`);
+  console.log(`[BUY-QUOTE] ${stable.sym}->${buyKey} $${usd} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`);
 
   if (DRY_RUN) { console.log(`[BUY-DRY] ${stable.sym}->${buyKey} $${usd} minOut=${minOut}`); return; }
 
   try {
     await ensureSocket();
-    const pending = await gswap.swaps.swap(
-      stable.classKey, OUT, q.feeTier,
-      { exactIn: usd.toString(), amountOutMinimum: minOut },
-      WALLET
-    );
 
-    if (DEBUG) { try { console.log('[BUY-PENDING]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {} }
+    // Submit swap
+    let pending;
+    try {
+      pending = await gswap.swaps.swap(
+        stable.classKey, OUT, q.feeTier,
+        { exactIn: usd.toString(), amountOutMinimum: minOut },
+        WALLET
+      );
+    } catch (submitErr) {
+      const msg = submitErr?.message || submitErr;
+      const body = submitErr?.response?.data ? JSON.stringify(submitErr.response.data) : '';
+      console.log(`[BUY-SUBMIT-ERR] ${stable.sym}->${buyKey}: ${msg} ${body}`);
+      console.log('Fix tips: check endpoints (prod), stable token (GUSDT vs GUSDC), spendable balance, and try higher SLIPPAGE_BPS for testing.');
+      return;
+    }
 
-    // short, configurable wait (default 2 min if you set TX_WAIT_MS=120000 in env)
-    const start = Date.now();
+    // Log whatever tx identifiers exist
+    try { console.log('[BUY-PENDING]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {}
+
+    // Primary wait (capped by TX_WAIT_MS via constructor)
+    const started = Date.now();
     try {
       const receipt = await pending.wait();
       console.log('✅ BUY done:', { txId: receipt.txId, hash: receipt.transactionHash });
-    } catch (e) {
-      const waited = Date.now() - start;
-      // If we timed out, log and exit gracefully (don’t fail CI)
-      console.log(`[BUY-WAIT] timed out after ${waited}ms (TX_WAIT_MS=${TX_WAIT_MS}).`);
-      try { console.log('[BUY-PENDING-INFO]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {}
-      console.log('ℹ️  This often confirms shortly after. You can check the tx on the explorer using the id/hash above.');
+      return;
+    } catch (waitErr) {
+      const waited = Date.now() - started;
+      console.log(`[BUY-WAIT] failed after ${waited}ms (TX_WAIT_MS=${TX_WAIT_MS}). ${waitErr?.message || waitErr}`);
     }
 
+    // Fallback: balance-based confirmation (6x over ~30s)
+    const targetSym = buyKey === 'GALA' ? 'GALA' : 'GWETH';
+    const beforeBought = Number(balancesBefore[targetSym] || 0);
+    const beforeStable = Number(balancesBefore[stable.sym] || 0);
+
+    for (let i = 0; i < 6; i++) {
+      await sleep(5000);
+      const after = await getBalancesMap();
+      const afterBought = Number(after[targetSym] || 0);
+      const afterStable = Number(after[stable.sym] || 0);
+      const stableDropped = afterStable + 1e-6 <= beforeStable - usd + 1e-3;
+      const boughtIncreased = afterBought > beforeBought;
+
+      if (stableDropped && boughtIncreased) {
+        console.log(`✅ BUY likely executed (balance confirm): ${stable.sym} ${beforeStable}→${afterStable}, ${targetSym} ${beforeBought}→${afterBought}`);
+        return;
+      }
+    }
+
+    console.log('[BUY-ERR] Could not confirm within fallback window. Keep SLIPPAGE_BPS=200 during testing, ensure endpoints are prod, and try TX_WAIT_MS=180000.');
+
   } catch (e) {
-    console.log(`[BUY-ERR] ${stable.sym}->${buyKey} ${e?.message || e}`);
+    console.log(`[BUY-ERR] ${stable.sym}->${buyKey}: ${e?.message || e}`);
   }
 }
-
 
 // -----------------------------
 // One-shot entry
