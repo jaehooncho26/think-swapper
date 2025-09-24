@@ -32,8 +32,8 @@ jobs:
 
           # Runtime
           DRY_RUN:        "false"       # real swap
-          BOT_USD_CENTS:  "500"         # $5 for clear balance delta on first real test
-          SLIPPAGE_BPS:   "200"         # 2.0% cushion while testing
+          BOT_USD_CENTS:  "100"         # $5 for clear balance delta on first real test
+          SLIPPAGE_BPS:   "100"         # 2.0% cushion while testing
           MIN_PROFIT_BPS: "10"          # sell filter, irrelevant for buy leg
           TX_WAIT_MS:     "120000"      # 2-minute wait window
 
@@ -43,5 +43,5 @@ jobs:
           DEX_BACKEND_BASE_URL:  "https://dex-backend-prod1.defi.gala.com"
 
           # One-time verbose logs; turn off after success
-          DEBUG: "true"
+          DEBUG: "false"
         run: npm run once
