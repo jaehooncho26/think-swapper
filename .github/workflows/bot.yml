@@ -34,7 +34,7 @@ jobs:
           # Safe defaults (tweak as needed)
           DRY_RUN:        "false"       # flip to "false" after testing
           BOT_USD_CENTS:  "100"        # $1 each tick
-          SLIPPAGE_BPS:   "150"         # 1.5%
+          SLIPPAGE_BPS:   "200"         # 2%
           MIN_PROFIT_BPS: "10"         # 0.10%
 
           # Optional: uncomment & set if you need to pin prod endpoints
