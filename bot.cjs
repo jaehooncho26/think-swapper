@@ -1,6 +1,6 @@
 // bot.cjs
 // Flip–Flop bot for GalaSwap using @gala-chain/gswap-sdk
-// - Uses gswap.swap(...) (no .wait()), then confirms by polling balances
+// - Uses gswap.swaps.swap(...) (no .wait()), then confirms by polling balances
 // - Auto-detects GUSDT/GUSDC (prefers GUSDT)
 // - Robust balances fetch (SDK default → paged fallbacks)
 // - Tunable slippage (SLIPPAGE_BPS) and buy size (BOT_USD_CENTS)
@@ -177,14 +177,14 @@ async function trySellIfProfitable(symbolKey) {
 
   try {
     // Submit swap (no wait)
-    const submitRes = await gswap.swap(
+    const submitRes = await gswap.swaps.swap(
       IN, OUT, q.feeTier,
       { exactIn: qty.toString(), amountOutMinimum: minOut },
       WALLET
     );
     if (DEBUG) console.log('[SELL-SUBMIT]', submitRes);
 
-    // Optional: quick balance confirm (one pass)
+    // Quick balance confirm (best-effort)
     await sleep(3000);
     const after = await getBalancesMap();
     const stableSym = (OUT === GUSDT) ? 'GUSDT' : (OUT === GUSDC ? 'GUSDC' : 'GUSDT');
@@ -227,14 +227,14 @@ async function buyOneDollar() {
 
   try {
     // Submit swap (no wait)
-    const submitRes = await gswap.swap(
+    const submitRes = await gswap.swaps.swap(
       stable.classKey, OUT, q.feeTier,
       { exactIn: usd.toString(), amountOutMinimum: minOut },
       WALLET
     );
     if (DEBUG) console.log('[BUY-SUBMIT]', submitRes);
 
-    // Fallback: balance-based confirmation (6x over ~30s)
+    // Balance-based confirmation (6x over ~30s)
     const targetSym = buyKey === 'GALA' ? 'GALA' : 'GWETH';
     const beforeBought = Number(balancesBefore[targetSym] || 0);
     const beforeStable = Number(balancesBefore[stable.sym] || 0);
