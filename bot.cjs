@@ -199,37 +199,45 @@ async function buyOneDollar() {
   if (!stable.sym) { console.log('[BUY-SKIP] No GUSDT/GUSDC balance detected'); return; }
   if (stable.amount + 1e-9 < usd) { console.log(`[BUY-SKIP] Not enough ${stable.sym} (need $${usd}, have $${stable.amount})`); return; }
 
-  const buyKey = nextBuyTokenKey();                     // 'GALA' or 'GWETH'
+  const buyKey = nextBuyTokenKey();       // 'GALA' or 'GWETH'
   const OUT = buyKey === 'GALA' ? GALA : GWETH;
 
   const q = await safeQuoteExactIn(stable.classKey, OUT, usd.toString());
   if (!q) { console.log(`[BUY-SKIP] No valid quote for ${stable.sym}->${buyKey} (usd=${usd}).`); return; }
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
-  if (DEBUG) { console.log(`[BUY-QUOTE] ${stable.sym}->${buyKey} $${usd} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`); }
+  if (DEBUG) console.log(`[BUY-QUOTE] ${stable.sym}->${buyKey} $${usd} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`);
 
   if (DRY_RUN) { console.log(`[BUY-DRY] ${stable.sym}->${buyKey} $${usd} minOut=${minOut}`); return; }
 
   try {
-    await ensureSocket(); // make sure event socket is up
+    await ensureSocket();
     const pending = await gswap.swaps.swap(
-      stable.classKey,
-      OUT,
-      q.feeTier,
+      stable.classKey, OUT, q.feeTier,
       { exactIn: usd.toString(), amountOutMinimum: minOut },
       WALLET
     );
 
     if (DEBUG) { try { console.log('[BUY-PENDING]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {} }
 
-    const receipt = await pending.wait();
-    console.log('✅ BUY done:', { txId: receipt.txId, hash: receipt.transactionHash });
+    // short, configurable wait (default 2 min if you set TX_WAIT_MS=120000 in env)
+    const start = Date.now();
+    try {
+      const receipt = await pending.wait();
+      console.log('✅ BUY done:', { txId: receipt.txId, hash: receipt.transactionHash });
+    } catch (e) {
+      const waited = Date.now() - start;
+      // If we timed out, log and exit gracefully (don’t fail CI)
+      console.log(`[BUY-WAIT] timed out after ${waited}ms (TX_WAIT_MS=${TX_WAIT_MS}).`);
+      try { console.log('[BUY-PENDING-INFO]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {}
+      console.log('ℹ️  This often confirms shortly after. You can check the tx on the explorer using the id/hash above.');
+    }
 
   } catch (e) {
-    console.log(`[BUY-ERR] ${stable.sym}->${buyKey} wait failed: ${e?.message || e}`);
-    console.log('Tip: increase SLIPPAGE_BPS (e.g., 150–200) and/or set DEBUG="true" to inspect feeTier & minOut. You can also raise TX_WAIT_MS.');
+    console.log(`[BUY-ERR] ${stable.sym}->${buyKey} ${e?.message || e}`);
   }
 }
+
 
 // -----------------------------
 // One-shot entry

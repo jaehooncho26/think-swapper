@@ -2,13 +2,13 @@ name: GalaDEX Bot
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes
+    - cron: "*/10 * * * *"   # every 10 minutes
   workflow_dispatch: {}
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     concurrency:
       group: galadex-bot
       cancel-in-progress: true
@@ -21,9 +21,9 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      # Install exactly what's in package-lock.json (deterministic)
+      # Install exactly what's in package-lock.json; fallback to npm install if lockfile missing
       - name: Install deps (locked)
-        run: npm ci
+        run: npm ci || npm install
 
       - name: Run bot once
         env:
@@ -31,17 +31,18 @@ jobs:
           WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}   # include the "eth|" prefix
           PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}      # 0x... key
 
-          # Safe defaults (tweak as needed)
-          DRY_RUN:        "false"       # flip to "false" after testing
-          BOT_USD_CENTS:  "100"        # $1 each tick
-          SLIPPAGE_BPS:   "200"         # 2%
-          MIN_PROFIT_BPS: "10"         # 0.10%
+          # Runtime settings
+          DRY_RUN:        "false"       # set "true" to simulate without sending
+          BOT_USD_CENTS:  "100"         # $1 per tick
+          SLIPPAGE_BPS:   "200"         # 2.0% (testing cushion)
+          MIN_PROFIT_BPS: "10"          # 0.10%
+          TX_WAIT_MS:     "120000"      # 2-minute confirmation wait
 
-          # Optional: uncomment & set if you need to pin prod endpoints
+          # Optional: pin production endpoints (usually not needed)
           # GATEWAY_BASE_URL:     ${{ secrets.GATEWAY_BASE_URL }}
           # BUNDLER_BASE_URL:     ${{ secrets.BUNDLER_BASE_URL }}
           # DEX_BACKEND_BASE_URL: ${{ secrets.DEX_BACKEND_BASE_URL }}
 
-          # Optional: SDK verbose logs while debugging
+          # Optional: extra logs for one run
           # DEBUG: "true"
         run: npm run once
