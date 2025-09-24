@@ -3,6 +3,7 @@ on:
   schedule:
     - cron: "*/10 * * * *"     # every 10 minutes; change to */30 for 30m
   workflow_dispatch: {}         # manual "Run workflow" button
+
 jobs:
   trade:
     runs-on: ubuntu-latest
@@ -13,17 +14,37 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # restore cached bot state (persists avg costs across runs)
+      - name: Restore bot state
+        uses: actions/cache@v4
+        with:
+          path: .bot_state.json
+          key: bot-state-${{ github.ref }}
+          restore-keys: |
+            bot-state-
+
       - run: npm i @gala-chain/gswap-sdk
+
       - name: Run one tick
         env:
           # Secrets (repo → Settings → Secrets and variables → Actions)
           WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
-          PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}     # 0x… GalaChain key
+          PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}     # GalaChain key
 
           # Variables (optional defaults; can edit in repo → Settings → Variables)
           DRY_RUN:        "false"                        # set "true" to test without sending
-          BOT_INTERVAL_MIN: "10"                         # used only when not in 'once' mode
+          BOT_INTERVAL_MIN: "10"                         # only used in loop mode, not once
           BOT_USD_CENTS:  ${{ vars.BOT_USD_CENTS || 100 }}  # 100 = $1
           SLIPPAGE_BPS:   ${{ vars.SLIPPAGE_BPS || 50 }}
-          MIN_PROFIT_BPS: ${{ vars.MIN_PROFIT_BPS || 10 }}
+          MIN_PROFIT_BPS: ${{ vars.MIN_PROFIT_BPS || 50 }}
+          PROFIT_BUFFER_BPS: "50"                        # extra buffer for fees/slippage
         run: node bot.js once
+
+      # save updated state file back into cache
+      - name: Save bot state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .bot_state.json
+          key: bot-state-${{ github.ref }}
