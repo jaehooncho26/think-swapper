@@ -1,10 +1,8 @@
-// bot.cjs
-// Flip–Flop bot for GalaSwap using @gala-chain/gswap-sdk
-// - Uses gswap.swaps.swap(...) (no .wait()), then confirms by polling balances
-// - Auto-detects GUSDT/GUSDC (prefers GUSDT)
-// - Robust balances fetch (SDK default → paged fallbacks)
-// - Tunable slippage (SLIPPAGE_BPS) and buy size (BOT_USD_CENTS)
-// - One-shot mode for CI: `node bot.cjs once`
+// bot.cjs — Flip–Flop bot for GalaSwap (with GALA gas reserve)
+// - Auto-detect GUSDT/GUSDC
+// - Never sells below GAS_MIN_GALA
+// - Auto top-up GALA from stable when under reserve
+// - Uses gswap.swaps.swap(...) (no .wait()); confirms via balance polling
 
 require('dotenv').config();
 const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
@@ -17,9 +15,13 @@ const PRIVATE_KEY   = (process.env.PRIVATE_KEY || '').trim();      // 0x...
 const DRY_RUN       = ((process.env.DRY_RUN || 'true').toLowerCase() === 'true');
 
 const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);    // 100 = $1
-const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 200)); // 2.0% default
+const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 200)); // 2.0% default (loosen/tighten as needed)
 const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10)); // 0.10% sell filter
 const DEBUG         = ((process.env.DEBUG || 'false').toLowerCase() === 'true');
+
+// Gas reserve knobs
+const GAS_MIN_GALA        = Math.max(0, Number(process.env.GAS_MIN_GALA || 2));    // keep at least this much GALA
+const GAS_TOPUP_USD_CENTS = Math.max(0, Number(process.env.GAS_TOPUP_USD_CENTS || 200)); // spend this much stable to refill gas
 
 // Optional: pin endpoints (recommended while debugging)
 const gatewayBaseUrl    = process.env.GATEWAY_BASE_URL;
@@ -125,6 +127,7 @@ async function getBalancesMap() {
     console.log('[TOKENS]', Object.keys(map));
     if (map.GUSDT != null) console.log('[GUSDT]', map.GUSDT);
     if (map.GUSDC != null) console.log('[GUSDC]', map.GUSDC);
+    if (map.GALA  != null) console.log('[GALA]',  map.GALA);
   }
   return map;
 }
@@ -152,12 +155,97 @@ async function safeQuoteExactIn(IN_CLASS, OUT_CLASS, amountStr) {
 }
 
 // -----------------------------
+// Gas reserve helpers
+// -----------------------------
+function needsGasTopUp(balances) {
+  const galaBal = Number(balances.GALA || 0);
+  return galaBal + 1e-9 < GAS_MIN_GALA;
+}
+
+async function topUpGasIfNeeded() {
+  const before = await getBalancesMap();
+  if (!needsGasTopUp(before)) {
+    if (DEBUG) console.log(`[GAS] GALA balance OK (>= ${GAS_MIN_GALA})`);
+    return false;
+  }
+
+  const stable = resolveStableFromBalances(before);
+  if (!stable.sym) {
+    console.log(`[GAS] Need GALA top-up but no GUSDT/GUSDC available.`);
+    return false;
+  }
+
+  const usd = toDollars(GAS_TOPUP_USD_CENTS);
+  if (!(stable.amount + 1e-9 >= usd)) {
+    console.log(`[GAS] Need GALA top-up but insufficient ${stable.sym}. Need ~$${usd}, have ~$${stable.amount}`);
+    return false;
+  }
+
+  // Quote stable -> GALA for usd
+  const q = await safeQuoteExactIn(stable.classKey, GALA, usd.toString());
+  if (!q) {
+    console.log(`[GAS] No valid quote for ${stable.sym}->GALA top-up ($${usd}).`);
+    return false;
+  }
+
+  const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
+  console.log(`[GAS] Top-up: ${stable.sym}->GALA $${usd} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`);
+
+  if (DRY_RUN) {
+    console.log(`[GAS-DRY] Would top-up GALA gas reserve.`);
+    return true; // logical success in dry-run
+  }
+
+  try {
+    const submitRes = await gswap.swaps.swap(
+      stable.classKey, GALA, q.feeTier,
+      { exactIn: usd.toString(), amountOutMinimum: minOut },
+      WALLET
+    );
+    if (DEBUG) console.log('[GAS-SUBMIT]', submitRes);
+
+    // Confirm by balances (short)
+    for (let i = 0; i < 12; i++) { // up to ~60s
+      await sleep(5000);
+      const after = await getBalancesMap();
+      const galaBefore = Number(before.GALA || 0);
+      const galaAfter  = Number(after.GALA  || 0);
+      const stableBefore = Number(before[stable.sym] || 0);
+      const stableAfter  = Number(after[stable.sym]  || 0);
+      const stableDropped = stableAfter + 1e-6 <= stableBefore - usd + 1e-3;
+      const galaIncreased = galaAfter > galaBefore;
+
+      if (stableDropped && galaIncreased) {
+        console.log(`✅ GAS top-up confirmed: ${stable.sym} ${stableBefore}→${stableAfter}, GALA ${galaBefore}→${galaAfter}`);
+        return true;
+      }
+    }
+    console.log('[GAS-NOCONFIRM] Top-up submitted but not yet reflected in balances. It may still settle.');
+    return true; // submitted; not blocking main flow
+  } catch (e) {
+    console.log(`[GAS-SUBMIT-ERR] ${e?.message || e}`);
+    return false;
+  }
+}
+
+// -----------------------------
 // Trading helpers
 // -----------------------------
 async function trySellIfProfitable(symbolKey) {
   const balances = await getBalancesMap();
-  const qty = Number(balances[symbolKey] || 0);
-  if (!(qty > 0)) { console.log(`[SELL-SKIP] No ${symbolKey} balance`); return; }
+
+  // If selling GALA, sell only the excess above reserve
+  let qty = Number(balances[symbolKey] || 0);
+  if (symbolKey === 'GALA') {
+    const excess = Math.max(0, qty - GAS_MIN_GALA);
+    if (excess <= 0) {
+      console.log(`[SELL-SKIP] GALA at/below reserve (hold ${qty}, reserve ${GAS_MIN_GALA}).`);
+      return;
+    }
+    qty = excess;
+  } else {
+    if (!(qty > 0)) { console.log(`[SELL-SKIP] No ${symbolKey} balance`); return; }
+  }
 
   const IN  = symbolKey === 'GALA' ? GALA : GWETH;
   const stable = resolveStableFromBalances(balances);
@@ -176,7 +264,6 @@ async function trySellIfProfitable(symbolKey) {
   if (DRY_RUN) { console.log(`[SELL-DRY] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} minOut=${minOut}`); return; }
 
   try {
-    // Submit swap (no wait)
     const submitRes = await gswap.swaps.swap(
       IN, OUT, q.feeTier,
       { exactIn: qty.toString(), amountOutMinimum: minOut },
@@ -185,7 +272,7 @@ async function trySellIfProfitable(symbolKey) {
     if (DEBUG) console.log('[SELL-SUBMIT]', submitRes);
 
     // Quick balance confirm (best-effort)
-    await sleep(3000);
+    await sleep(5000);
     const after = await getBalancesMap();
     const stableSym = (OUT === GUSDT) ? 'GUSDT' : (OUT === GUSDC ? 'GUSDC' : 'GUSDT');
     const soldBefore = Number(balances[symbolKey] || 0);
@@ -226,7 +313,6 @@ async function buyOneDollar() {
   if (DRY_RUN) { console.log(`[BUY-DRY] ${stable.sym}->${buyKey} $${usd} minOut=${minOut}`); return; }
 
   try {
-    // Submit swap (no wait)
     const submitRes = await gswap.swaps.swap(
       stable.classKey, OUT, q.feeTier,
       { exactIn: usd.toString(), amountOutMinimum: minOut },
@@ -263,17 +349,23 @@ async function buyOneDollar() {
     const msg  = submitErr?.message || submitErr;
     const body = submitErr?.response?.data ? JSON.stringify(submitErr.response.data) : '';
     console.log(`[BUY-SUBMIT-ERR] ${stable.sym}->${buyKey}: ${msg} ${body}`);
-    console.log('Fix tips: check endpoints (prod), stable token (GUSDT vs GUSDC), spendable balance, or raise SLIPPAGE_BPS while testing.');
+    console.log('Fix tips: endpoints (prod), correct stable (GUSDT/GUSDC), spendable balance, or raise SLIPPAGE_BPS while testing.');
   }
 }
 
 // -----------------------------
-// One-shot entry
+// One-shot entry (with gas-first policy)
 // -----------------------------
 async function runOnce() {
   try {
+    // 0) GAS FIRST: top-up if below reserve
+    await topUpGasIfNeeded();
+
+    // 1) Try to close profit on excess GALA (never below reserve) and any GWETH
     await trySellIfProfitable('GALA');
     await trySellIfProfitable('GWETH');
+
+    // 2) Alternate buy
     await buyOneDollar();
   } catch (e) {
     console.error('❌ Bot error:', e?.message || e);
