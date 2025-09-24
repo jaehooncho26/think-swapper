@@ -1,9 +1,10 @@
 // bot.cjs
 // Flip–Flop bot for GalaSwap using @gala-chain/gswap-sdk
-// - GUSDT/GUSDC auto-detect
-// - Robust balances loader
-// - Tunable slippage & TX wait
-// - One-shot mode: `node bot.cjs once`
+// - Uses gswap.swap(...) (no .wait()), then confirms by polling balances
+// - Auto-detects GUSDT/GUSDC (prefers GUSDT)
+// - Robust balances fetch (SDK default → paged fallbacks)
+// - Tunable slippage (SLIPPAGE_BPS) and buy size (BOT_USD_CENTS)
+// - One-shot mode for CI: `node bot.cjs once`
 
 require('dotenv').config();
 const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
@@ -11,17 +12,16 @@ const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
 // -----------------------------
 // Env & constants
 // -----------------------------
-const WALLET        = (process.env.WALLET_ADDRESS || '').trim();     // e.g., "eth|0x..."
-const PRIVATE_KEY   = (process.env.PRIVATE_KEY || '').trim();        // 0x...
+const WALLET        = (process.env.WALLET_ADDRESS || '').trim();   // e.g., "eth|0x..."
+const PRIVATE_KEY   = (process.env.PRIVATE_KEY || '').trim();      // 0x...
 const DRY_RUN       = ((process.env.DRY_RUN || 'true').toLowerCase() === 'true');
 
-const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);      // e.g., 100 = $1
-const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 200));  // try 150–200 while testing
-const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10)); // sell filter (0.10%)
-const TX_WAIT_MS    = Math.max(60000, Number(process.env.TX_WAIT_MS || 180000)); // 60s min; default 3m
+const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);    // 100 = $1
+const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 200)); // 2.0% default
+const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10)); // 0.10% sell filter
 const DEBUG         = ((process.env.DEBUG || 'false').toLowerCase() === 'true');
 
-// Optional: pin production endpoints via env (recommended while debugging)
+// Optional: pin endpoints (recommended while debugging)
 const gatewayBaseUrl    = process.env.GATEWAY_BASE_URL;
 const bundlerBaseUrl    = process.env.BUNDLER_BASE_URL;
 const dexBackendBaseUrl = process.env.DEX_BACKEND_BASE_URL || undefined;
@@ -53,11 +53,10 @@ const gswap = new GSwap({
   gatewayBaseUrl,
   bundlerBaseUrl,
   dexBackendBaseUrl,
-  transactionWaitTimeoutMs: TX_WAIT_MS,
 });
 
 if (DEBUG) {
-  console.log('[ENDPOINTS]', { gatewayBaseUrl, bundlerBaseUrl, dexBackendBaseUrl, wallet: WALLET, TX_WAIT_MS });
+  console.log('[ENDPOINTS]', { gatewayBaseUrl, bundlerBaseUrl, dexBackendBaseUrl, wallet: WALLET });
 }
 
 // -----------------------------
@@ -70,7 +69,6 @@ function isPositiveAmount(xStr) { const n = Number(xStr); return Number.isFinite
 function bpsMulStr(xStr, bps){ const x=Number(xStr); return ((x*(10000-bps))/10000).toString(); }
 function gainBps(inUSDC, outUSDC){ return ((outUSDC - inUSDC) / Math.max(1e-6, inUSDC)) * 10000; }
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-async function ensureSocket(){ if (!GSwap.events.eventSocketConnected()) { await GSwap.events.connectEventSocket(); } }
 
 // -------- Balances (robust attempts) --------
 async function getBalancesMap() {
@@ -178,17 +176,30 @@ async function trySellIfProfitable(symbolKey) {
   if (DRY_RUN) { console.log(`[SELL-DRY] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} minOut=${minOut}`); return; }
 
   try {
-    await ensureSocket();
-    const pending = await gswap.swaps.swap(
+    // Submit swap (no wait)
+    const submitRes = await gswap.swap(
       IN, OUT, q.feeTier,
       { exactIn: qty.toString(), amountOutMinimum: minOut },
       WALLET
     );
-    if (DEBUG) { try { console.log('[SELL-PENDING]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {} }
-    const receipt = await pending.wait();
-    console.log('✅ SELL done:', { txId: receipt.txId, hash: receipt.transactionHash });
+    if (DEBUG) console.log('[SELL-SUBMIT]', submitRes);
+
+    // Optional: quick balance confirm (one pass)
+    await sleep(3000);
+    const after = await getBalancesMap();
+    const stableSym = (OUT === GUSDT) ? 'GUSDT' : (OUT === GUSDC ? 'GUSDC' : 'GUSDT');
+    const soldBefore = Number(balances[symbolKey] || 0);
+    const soldAfter  = Number(after[symbolKey] || 0);
+    const stableBefore = Number(balances[stableSym] || 0);
+    const stableAfter  = Number(after[stableSym] || 0);
+
+    if (soldAfter < soldBefore && stableAfter > stableBefore) {
+      console.log(`✅ SELL likely executed: ${symbolKey} ${soldBefore}→${soldAfter}, ${stableSym} ${stableBefore}→${stableAfter}`);
+    } else {
+      console.log('[SELL-NOCONFIRM] Could not verify via balances immediately (may still settle).');
+    }
   } catch (e) {
-    console.log(`[SELL-ERR] ${symbolKey}->${stable.sym || 'GUSDT'} wait failed: ${e?.message || e}`);
+    console.log(`[SELL-SUBMIT-ERR] ${symbolKey}->${stable.sym || 'GUSDT'}: ${e?.message || e}`);
   }
 }
 
@@ -215,43 +226,20 @@ async function buyOneDollar() {
   if (DRY_RUN) { console.log(`[BUY-DRY] ${stable.sym}->${buyKey} $${usd} minOut=${minOut}`); return; }
 
   try {
-    await ensureSocket();
-
-    // Submit swap
-    let pending;
-    try {
-      pending = await gswap.swaps.swap(
-        stable.classKey, OUT, q.feeTier,
-        { exactIn: usd.toString(), amountOutMinimum: minOut },
-        WALLET
-      );
-    } catch (submitErr) {
-      const msg = submitErr?.message || submitErr;
-      const body = submitErr?.response?.data ? JSON.stringify(submitErr.response.data) : '';
-      console.log(`[BUY-SUBMIT-ERR] ${stable.sym}->${buyKey}: ${msg} ${body}`);
-      console.log('Fix tips: check endpoints (prod), stable token (GUSDT vs GUSDC), spendable balance, and try higher SLIPPAGE_BPS for testing.');
-      return;
-    }
-
-    // Log whatever tx identifiers exist
-    try { console.log('[BUY-PENDING]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {}
-
-    // Primary wait (capped by TX_WAIT_MS via constructor)
-    const started = Date.now();
-    try {
-      const receipt = await pending.wait();
-      console.log('✅ BUY done:', { txId: receipt.txId, hash: receipt.transactionHash });
-      return;
-    } catch (waitErr) {
-      const waited = Date.now() - started;
-      console.log(`[BUY-WAIT] failed after ${waited}ms (TX_WAIT_MS=${TX_WAIT_MS}). ${waitErr?.message || waitErr}`);
-    }
+    // Submit swap (no wait)
+    const submitRes = await gswap.swap(
+      stable.classKey, OUT, q.feeTier,
+      { exactIn: usd.toString(), amountOutMinimum: minOut },
+      WALLET
+    );
+    if (DEBUG) console.log('[BUY-SUBMIT]', submitRes);
 
     // Fallback: balance-based confirmation (6x over ~30s)
     const targetSym = buyKey === 'GALA' ? 'GALA' : 'GWETH';
     const beforeBought = Number(balancesBefore[targetSym] || 0);
     const beforeStable = Number(balancesBefore[stable.sym] || 0);
 
+    let confirmed = false;
     for (let i = 0; i < 6; i++) {
       await sleep(5000);
       const after = await getBalancesMap();
@@ -262,14 +250,20 @@ async function buyOneDollar() {
 
       if (stableDropped && boughtIncreased) {
         console.log(`✅ BUY likely executed (balance confirm): ${stable.sym} ${beforeStable}→${afterStable}, ${targetSym} ${beforeBought}→${afterBought}`);
-        return;
+        confirmed = true;
+        break;
       }
     }
 
-    console.log('[BUY-ERR] Could not confirm within fallback window. Keep SLIPPAGE_BPS=200 during testing, ensure endpoints are prod, and try TX_WAIT_MS=180000.');
+    if (!confirmed) {
+      console.log('[BUY-NOCONFIRM] Could not confirm via balances within ~30s. It may still settle shortly.');
+    }
 
-  } catch (e) {
-    console.log(`[BUY-ERR] ${stable.sym}->${buyKey}: ${e?.message || e}`);
+  } catch (submitErr) {
+    const msg  = submitErr?.message || submitErr;
+    const body = submitErr?.response?.data ? JSON.stringify(submitErr.response.data) : '';
+    console.log(`[BUY-SUBMIT-ERR] ${stable.sym}->${buyKey}: ${msg} ${body}`);
+    console.log('Fix tips: check endpoints (prod), stable token (GUSDT vs GUSDC), spendable balance, or raise SLIPPAGE_BPS while testing.');
   }
 }
 
