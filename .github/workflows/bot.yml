@@ -37,6 +37,10 @@ jobs:
           MIN_PROFIT_BPS: "10"          # sell filter, irrelevant for buy leg
           TX_WAIT_MS:     "120000"      # 2-minute wait window
 
+          # Gas reserve (new)
+          GAS_MIN_GALA:        "1500"   # keep at least 1,500 GALA at all times
+          GAS_TOPUP_USD_CENTS: "5000"   # when under 1,500, buy ~$50 of GALA to refill
+
           # Pin PRODUCTION endpoints explicitly
           GATEWAY_BASE_URL:      "https://gateway-mainnet.galachain.com"
           BUNDLER_BASE_URL:      "https://bundle-backend-prod1.defi.gala.com"
