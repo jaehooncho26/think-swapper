@@ -2,7 +2,7 @@ name: GalaDEX Bot
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
+    - cron: "0 * * * *"   # every hour
   workflow_dispatch: {}
 
 jobs:
@@ -32,8 +32,8 @@ jobs:
 
           # Runtime
           DRY_RUN:        "false"       # real swap
-          BOT_USD_CENTS:  "100"         # $5 for clear balance delta on first real test
-          SLIPPAGE_BPS:   "100"         # 2.0% cushion while testing
+          BOT_USD_CENTS:  "300"         # $5 for clear balance delta on first real test
+          SLIPPAGE_BPS:   "50"         # 2.0% cushion while testing
           MIN_PROFIT_BPS: "10"          # sell filter, irrelevant for buy leg
           TX_WAIT_MS:     "120000"      # 2-minute wait window
 
