@@ -21,28 +21,27 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      # Install exactly what's in package-lock.json; fallback to npm install if lockfile missing
       - name: Install deps (locked)
         run: npm ci || npm install
 
       - name: Run bot once
         env:
-          # Secrets (must be set in repo → Settings → Secrets and variables → Actions)
-          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}   # include the "eth|" prefix
-          PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}      # 0x... key
+          # REQUIRED: wallet & key
+          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}   # must include "eth|" prefix
+          PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}
 
-          # Runtime settings
-          DRY_RUN:        "false"       # set "true" to simulate without sending
-          BOT_USD_CENTS:  "100"         # $1 per tick
-          SLIPPAGE_BPS:   "200"         # 2.0% (testing cushion)
-          MIN_PROFIT_BPS: "10"          # 0.10%
-          TX_WAIT_MS:     "120000"      # 2-minute confirmation wait
+          # Runtime
+          DRY_RUN:        "false"       # real swap
+          BOT_USD_CENTS:  "500"         # $5 for clear balance delta on first real test
+          SLIPPAGE_BPS:   "200"         # 2.0% cushion while testing
+          MIN_PROFIT_BPS: "10"          # sell filter, irrelevant for buy leg
+          TX_WAIT_MS:     "120000"      # 2-minute wait window
 
-          # Optional: pin production endpoints (usually not needed)
-          # GATEWAY_BASE_URL:     ${{ secrets.GATEWAY_BASE_URL }}
-          # BUNDLER_BASE_URL:     ${{ secrets.BUNDLER_BASE_URL }}
-          # DEX_BACKEND_BASE_URL: ${{ secrets.DEX_BACKEND_BASE_URL }}
+          # Pin PRODUCTION endpoints explicitly
+          GATEWAY_BASE_URL:      "https://gateway-mainnet.galachain.com"
+          BUNDLER_BASE_URL:      "https://bundle-backend-prod1.defi.gala.com"
+          DEX_BACKEND_BASE_URL:  "https://dex-backend-prod1.defi.gala.com"
 
-          # Optional: extra logs for one run
-          # DEBUG: "true"
+          # One-time verbose logs; turn off after success
+          DEBUG: "true"
         run: npm run once
