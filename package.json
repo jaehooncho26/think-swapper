@@ -5,7 +5,7 @@
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
-    "once": "node bot.js once",
+    "once": "node bot.cjs once",
     "start:sidecar": "node sidecar.js",
     "serve:frontend": "npx serve frontend",
     "test": "echo \"no tests\" && exit 0"

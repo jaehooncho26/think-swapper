@@ -32,7 +32,7 @@ jobs:
           PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}      # 0x... key
 
           # Safe defaults (tweak as needed)
-          DRY_RUN:        "true"       # flip to "false" after testing
+          DRY_RUN:        "false"       # flip to "false" after testing
           BOT_USD_CENTS:  "100"        # $1 each tick
           SLIPPAGE_BPS:   "50"         # 0.50%
           MIN_PROFIT_BPS: "10"         # 0.10%
