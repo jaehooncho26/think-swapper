@@ -1,17 +1,17 @@
 {
   "name": "gala-arb-ts",
   "version": "1.0.0",
-  "main": "index.js",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "once": "node bot.js once",
     "start:sidecar": "node sidecar.js",
-    "serve:frontend": "npx serve frontend"
+    "serve:frontend": "npx serve frontend",
+    "test": "echo \"no tests\" && exit 0"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "@gala-chain/gswap-sdk": "^0.0.7",
+    "@gala-chain/gswap-sdk": "0.0.7",
     "bignumber.js": "^9.3.1",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
@@ -24,6 +24,5 @@
   },
   "devDependencies": {
     "@types/node": "^24.5.2"
-  },
-  "description": ""
+  }
 }

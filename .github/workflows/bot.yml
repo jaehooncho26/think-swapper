@@ -1,50 +1,47 @@
-name: Flip-Flop Trader
+name: GalaDEX Bot
+
 on:
   schedule:
-    - cron: "*/10 * * * *"     # every 10 minutes; change to */30 for 30m
-  workflow_dispatch: {}         # manual "Run workflow" button
+    - cron: "*/15 * * * *"   # every 15 minutes
+  workflow_dispatch: {}
 
 jobs:
-  trade:
+  run-bot:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 10
+    concurrency:
+      group: galadex-bot
+      cancel-in-progress: true
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
+          cache: 'npm'
 
-      # restore cached bot state (persists avg costs across runs)
-      - name: Restore bot state
-        uses: actions/cache@v4
-        with:
-          path: .bot_state.json
-          key: bot-state-${{ github.ref }}
-          restore-keys: |
-            bot-state-
+      # Install exactly what's in package-lock.json (deterministic)
+      - name: Install deps (locked)
+        run: npm ci
 
-      - run: npm i @gala-chain/gswap-sdk
-
-      - name: Run one tick
+      - name: Run bot once
         env:
-          # Secrets (repo → Settings → Secrets and variables → Actions)
-          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}
-          PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}     # GalaChain key
+          # Secrets (must be set in repo → Settings → Secrets and variables → Actions)
+          WALLET_ADDRESS: ${{ secrets.WALLET_ADDRESS }}   # include the "eth|" prefix
+          PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}      # 0x... key
 
-          # Variables (optional defaults; can edit in repo → Settings → Variables)
-          DRY_RUN:        "false"                        # set "true" to test without sending
-          BOT_INTERVAL_MIN: "10"                         # only used in loop mode, not once
-          BOT_USD_CENTS:  ${{ vars.BOT_USD_CENTS || 100 }}  # 100 = $1
-          SLIPPAGE_BPS:   ${{ vars.SLIPPAGE_BPS || 50 }}
-          MIN_PROFIT_BPS: ${{ vars.MIN_PROFIT_BPS || 50 }}
-          PROFIT_BUFFER_BPS: "50"                        # extra buffer for fees/slippage
-        run: node bot.js once
+          # Safe defaults (tweak as needed)
+          DRY_RUN:        "true"       # flip to "false" after testing
+          BOT_USD_CENTS:  "100"        # $1 each tick
+          SLIPPAGE_BPS:   "50"         # 0.50%
+          MIN_PROFIT_BPS: "10"         # 0.10%
 
-      # save updated state file back into cache
-      - name: Save bot state
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: .bot_state.json
-          key: bot-state-${{ github.ref }}
+          # Optional: uncomment & set if you need to pin prod endpoints
+          # GATEWAY_BASE_URL:     ${{ secrets.GATEWAY_BASE_URL }}
+          # BUNDLER_BASE_URL:     ${{ secrets.BUNDLER_BASE_URL }}
+          # DEX_BACKEND_BASE_URL: ${{ secrets.DEX_BACKEND_BASE_URL }}
+
+          # Optional: SDK verbose logs while debugging
+          # DEBUG: "true"
+        run: npm run once
