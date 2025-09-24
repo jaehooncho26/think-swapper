@@ -1,9 +1,9 @@
-// bot.js
+// bot.cjs
 // Flip–Flop bot for GalaSwap using @gala-chain/gswap-sdk
-// - Deterministic installs via package-lock + SDK pinned in package.json
-// - Robust balances loader (handles page/limit quirks)
-// - Works with GUSDT or GUSDC (prefers GUSDT if both)
-// - DRY_RUN supported; one-shot mode: `node bot.js once`
+// - Robust balances loader
+// - GUSDT/GUSDC auto-detect
+// - Tunable slippage & wait timeout
+// - One-shot mode: `node bot.cjs once`
 
 require('dotenv').config();
 const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
@@ -14,12 +14,13 @@ const { GSwap, PrivateKeySigner } = require('@gala-chain/gswap-sdk');
 const WALLET        = (process.env.WALLET_ADDRESS || '').trim();     // e.g., "eth|0x..."
 const PRIVATE_KEY   = (process.env.PRIVATE_KEY || '').trim();        // 0x...
 const DRY_RUN       = ((process.env.DRY_RUN || 'true').toLowerCase() === 'true');
-const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);      // cents, default $1
-const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 50)); // 0.50%
-const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10)); // 0.10%
+const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);      // $1 default
+const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 100)); // try 100–200 when testing
+const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10));
 const DEBUG         = ((process.env.DEBUG || 'false').toLowerCase() === 'true');
+const TX_WAIT_MS    = Math.max(60000, Number(process.env.TX_WAIT_MS || 600000)); // default 10m
 
-// Optional endpoints (only set if you need to pin a specific environment)
+// Optional endpoints (pin if needed)
 const gatewayBaseUrl    = process.env.GATEWAY_BASE_URL;
 const bundlerBaseUrl    = process.env.BUNDLER_BASE_URL;
 const dexBackendBaseUrl = process.env.DEX_BACKEND_BASE_URL || undefined;
@@ -51,11 +52,11 @@ const gswap = new GSwap({
   gatewayBaseUrl,
   bundlerBaseUrl,
   dexBackendBaseUrl,
-  transactionWaitTimeoutMs: 300000
+  transactionWaitTimeoutMs: TX_WAIT_MS
 });
 
 if (DEBUG) {
-  console.log('[ENDPOINTS]', { gatewayBaseUrl, bundlerBaseUrl, dexBackendBaseUrl, wallet: WALLET });
+  console.log('[ENDPOINTS]', { gatewayBaseUrl, bundlerBaseUrl, dexBackendBaseUrl, wallet: WALLET, TX_WAIT_MS });
 }
 
 // -----------------------------
@@ -170,18 +171,22 @@ async function trySellIfProfitable(symbolKey) {
   if (bps < MIN_PROFIT_BPS) { console.log(`[SELL-SKIP] ${symbolKey} not profitable (bps=${bps.toFixed(2)})`); return; }
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
+  if (DEBUG) console.log(`[SELL-QUOTE] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`);
+
   if (DRY_RUN) { console.log(`[SELL-DRY] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} minOut=${minOut}`); return; }
 
   try {
     await ensureSocket();
-    const pending = await gswap.swaps.swap(IN, OUT, q.feeTier, {
-      exactIn: qty.toString(),
-      amountOutMinimum: minOut
-    }, WALLET);
+    const pending = await gswap.swaps.swap(
+      IN, OUT, q.feeTier,
+      { exactIn: qty.toString(), amountOutMinimum: minOut },
+      WALLET
+    );
+    if (DEBUG) { try { console.log('[SELL-PENDING]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {} }
     const receipt = await pending.wait();
     console.log('✅ SELL done:', { txId: receipt.txId, hash: receipt.transactionHash });
   } catch (e) {
-    console.log(`[SELL-ERR] ${symbolKey}->${stable.sym || 'GUSDT'} ${e?.message || e}`);
+    console.log(`[SELL-ERR] ${symbolKey}->${stable.sym || 'GUSDT'} wait failed: ${e?.message || e}`);
   }
 }
 
@@ -198,21 +203,31 @@ async function buyOneDollar() {
   const OUT = buyKey === 'GALA' ? GALA : GWETH;
 
   const q = await safeQuoteExactIn(stable.classKey, OUT, usd.toString());
-  if (!q) { console.log(`[BUY-SKIP] No valid quote for ${stable.sym}->${buyKey} (usd=${usd})`); return; }
+  if (!q) { console.log(`[BUY-SKIP] No valid quote for ${stable.sym}->${buyKey} (usd=${usd}).`); return; }
 
   const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
+  if (DEBUG) { console.log(`[BUY-QUOTE] ${stable.sym}->${buyKey} $${usd} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`); }
+
   if (DRY_RUN) { console.log(`[BUY-DRY] ${stable.sym}->${buyKey} $${usd} minOut=${minOut}`); return; }
 
   try {
-    await ensureSocket();
-    const pending = await gswap.swaps.swap(stable.classKey, OUT, q.feeTier, {
-      exactIn: usd.toString(),
-      amountOutMinimum: minOut
-    }, WALLET);
+    await ensureSocket(); // make sure event socket is up
+    const pending = await gswap.swaps.swap(
+      stable.classKey,
+      OUT,
+      q.feeTier,
+      { exactIn: usd.toString(), amountOutMinimum: minOut },
+      WALLET
+    );
+
+    if (DEBUG) { try { console.log('[BUY-PENDING]', { txId: pending?.txId, transactionHash: pending?.transactionHash }); } catch {} }
+
     const receipt = await pending.wait();
     console.log('✅ BUY done:', { txId: receipt.txId, hash: receipt.transactionHash });
+
   } catch (e) {
-    console.log(`[BUY-ERR] ${stable.sym}->${buyKey} ${e?.message || e}`);
+    console.log(`[BUY-ERR] ${stable.sym}->${buyKey} wait failed: ${e?.message || e}`);
+    console.log('Tip: increase SLIPPAGE_BPS (e.g., 150–200) and/or set DEBUG="true" to inspect feeTier & minOut. You can also raise TX_WAIT_MS.');
   }
 }
 
@@ -235,7 +250,7 @@ async function runOnce() {
     console.log('One-shot run complete. Exiting.');
     process.exit(0);
   } else {
-    console.log(`Starting loop. Use: node bot.js once`);
+    console.log('Run once mode recommended from CI. Usage: node bot.cjs once');
     await runOnce();
   }
 })();
