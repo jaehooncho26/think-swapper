@@ -31,8 +31,24 @@
     .title-img { width:100%; max-width:500px; height:auto; object-fit:contain; }
     .muted { color:#FFFFFF; font-weight:bold; font-size:40px; line-height:1.1; }
     .pill { display:inline-block; padding:5px 30px; border:2px solid #9c6025; border-radius:999px; font-family:monospace; background:#edba87; color:#000000; }
-    .text-value-pair { display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap; }
+    .text-value-pair {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-start; /* changed from center */
+      align-items: center;
+      flex-wrap: nowrap; /* changed from wrap */
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
     .text-value-pair img { height:40px; width:auto; }
+
+    .text-value-pair .muted {
+      margin-left: 6px;
+      margin-right: 6px;
+      white-space: nowrap;
+    }
+
   
     /* Transactions */
     .tx-title { font-size:36px; font-weight:bold; margin:4px 0 12px; text-align:center; margin-top:40px; margin-bottom:40px; }
@@ -84,7 +100,7 @@
       <div class="card">
         <div class="text-value-pair">
           <img src="usdtlogo.png" style="height:40px">
-          <div class="muted" style="margin-left:6px;">USDT:</div>
+          <div class="muted">USDT:</div>
           <div id="pUSDT" class="pill">—</div>
         </div>
       </div>
@@ -92,7 +108,7 @@
       <div class="card">
         <div class="text-value-pair">
           <img src="galalogo.png" style="height:40px">
-          <div class="muted" style="margin-left:6px;">GALA:</div>
+          <div class="muted">GALA:</div>
           <div id="pGALA" class="pill">—</div>
         </div>
       </div>
@@ -100,41 +116,42 @@
       <div class="card">
         <div class="text-value-pair">
           <img src="ethlogo.png" style="height:40px">
-          <div class="muted" style="margin-left:6px;">ETH:</div>
+          <div class="muted">ETH:</div>
           <div id="pETH" class="pill">—</div>
         </div>
       </div>
-      
-      
+                    
     </div>
 
     <div class="tx-title">Wallet (takes a few seconds to load)</div>
 
     <!-- Balances -->
-    <div class="card">
-      <div class="text-value-pair">
-        <img src="usdtlogo.png" style="height:40px">
-        <div class="muted" style="margin-left:6px;">USDT:</div>
-        <div id="bUSDT" class="pill">N/A</div>
+    <div class="grid g3" style="margin-top:14px;">
+      <div class="card">
+        <div class="text-value-pair">
+          <img src="usdtlogo.png" style="height:40px">
+          <div class="muted">USDT:</div>
+          <div id="bUSDT" class="pill">N/A</div>
+        </div>
       </div>
-    </div>
-    
-    <div class="card">
-      <div class="text-value-pair">
-        <img src="galalogo.png" style="height:40px">
-        <div class="muted" style="margin-left:6px;">GALA:</div>
-        <div id="bGALA" class="pill">N/A</div>
+      
+      <div class="card">
+        <div class="text-value-pair">
+          <img src="galalogo.png" style="height:40px">
+          <div class="muted">GALA:</div>
+          <div id="bGALA" class="pill">N/A</div>
+        </div>
       </div>
-    </div>
-    
-    <div class="card">
-      <div class="text-value-pair">
-        <img src="ethlogo.png" style="height:40px">
-        <div class="muted" style="margin-left:6px;">ETH:</div>
-        <div id="bETH" class="pill">N/A</div>
+      
+      <div class="card">
+        <div class="text-value-pair">
+          <img src="ethlogo.png" style="height:40px">
+          <div class="muted">ETH:</div>
+          <div id="bETH" class="pill">N/A</div>
+        </div>
       </div>
+      
     </div>
-    
 
     <!-- Wallet Total + P&L -->
     <div class="card" style="margin-top:14px;">
