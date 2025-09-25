@@ -1,7 +1,9 @@
-// bot.cjs — Flip–Flop bot for GalaSwap (with GALA gas reserve)
+// bot.cjs — Flip–Flop bot for GalaSwap (with GALA gas reserve + fee-aware profit rule)
 // - Auto-detect GUSDT/GUSDC
 // - Never sells below GAS_MIN_GALA
 // - Auto top-up GALA from stable when under reserve
+// - Alternates hourly: USDT→GALA, then USDT→ETH (GWETH)
+// - Only sells if round-trip profit ≥ MIN_PROFIT_BPS after estimating ~GALA fee
 // - Uses gswap.swaps.swap(...) (no .wait()); confirms via balance polling
 
 require('dotenv').config();
@@ -15,13 +17,16 @@ const PRIVATE_KEY   = (process.env.PRIVATE_KEY || '').trim();      // 0x...
 const DRY_RUN       = ((process.env.DRY_RUN || 'true').toLowerCase() === 'true');
 
 const USD_CENTS     = Number(process.env.BOT_USD_CENTS || 100);    // 100 = $1
-const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 200)); // 2.0% default (loosen/tighten as needed)
-const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10)); // 0.10% sell filter
+const SLIPPAGE_BPS  = Math.max(0, Number(process.env.SLIPPAGE_BPS || 200)); // 2.0% default
+const MIN_PROFIT_BPS= Math.max(0, Number(process.env.MIN_PROFIT_BPS || 10)); // sell threshold (bps)
 const DEBUG         = ((process.env.DEBUG || 'false').toLowerCase() === 'true');
 
 // Gas reserve knobs
-const GAS_MIN_GALA        = Math.max(0, Number(process.env.GAS_MIN_GALA || 2));    // keep at least this much GALA
+const GAS_MIN_GALA        = Math.max(0, Number(process.env.GAS_MIN_GALA || 2));      // keep at least this much GALA
 const GAS_TOPUP_USD_CENTS = Math.max(0, Number(process.env.GAS_TOPUP_USD_CENTS || 200)); // spend this much stable to refill gas
+
+// Approx per-swap fee in GALA (used in profit test)
+const GAS_FIXED_FEE_GALA  = Math.max(0, Number(process.env.GAS_FIXED_FEE_GALA || 1));
 
 // Optional: pin endpoints (recommended while debugging)
 const gatewayBaseUrl    = process.env.GATEWAY_BASE_URL;
@@ -64,8 +69,10 @@ if (DEBUG) {
 // -----------------------------
 // Helpers
 // -----------------------------
-function slot(minutes = 10) { return Math.floor(Date.now() / (minutes * 60 * 1000)); }
-function nextBuyTokenKey() { return slot(10) % 2 === 0 ? 'GALA' : 'GWETH'; }
+function slot(minutes = 60) { return Math.floor(Date.now() / (minutes * 60 * 1000)); }
+// Alternate each hour: even → GALA, odd → GWETH
+function nextBuyTokenKey() { return slot(60) % 2 === 0 ? 'GALA' : 'GWETH'; }
+
 function toDollars(cents) { return Math.max(0, Number(cents || 0)) / 100; }
 function isPositiveAmount(xStr) { const n = Number(xStr); return Number.isFinite(n) && n > 0; }
 function bpsMulStr(xStr, bps){ const x=Number(xStr); return ((x*(10000-bps))/10000).toString(); }
@@ -75,8 +82,6 @@ function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 // -------- Balances (robust attempts) --------
 async function getBalancesMap() {
   const map = {};
-
-  // Try SDK default first (no explicit page/limit)
   try {
     const r = await gswap.assets.getUserAssets(WALLET);
     const tokens = r?.tokens || [];
@@ -92,14 +97,12 @@ async function getBalancesMap() {
     if (DEBUG) console.log('[BALANCE-ERR default]', e?.message || e);
   }
 
-  // Fallback attempts for gateways with stricter params
   const attempts = [
     { start: 1, limit: 100 },
     { start: 1, limit: 50 },
     { start: 0, limit: 100 },
     { start: 0, limit: 50 },
   ];
-
   for (const { start, limit } of attempts) {
     let page = start, got = false;
     if (DEBUG) console.log(`[BALANCE-TRY] pageStart=${start} limit=${limit}`);
@@ -181,7 +184,6 @@ async function topUpGasIfNeeded() {
     return false;
   }
 
-  // Quote stable -> GALA for usd
   const q = await safeQuoteExactIn(stable.classKey, GALA, usd.toString());
   if (!q) {
     console.log(`[GAS] No valid quote for ${stable.sym}->GALA top-up ($${usd}).`);
@@ -193,7 +195,7 @@ async function topUpGasIfNeeded() {
 
   if (DRY_RUN) {
     console.log(`[GAS-DRY] Would top-up GALA gas reserve.`);
-    return true; // logical success in dry-run
+    return true;
   }
 
   try {
@@ -204,8 +206,7 @@ async function topUpGasIfNeeded() {
     );
     if (DEBUG) console.log('[GAS-SUBMIT]', submitRes);
 
-    // Confirm by balances (short)
-    for (let i = 0; i < 12; i++) { // up to ~60s
+    for (let i = 0; i < 12; i++) {
       await sleep(5000);
       const after = await getBalancesMap();
       const galaBefore = Number(before.GALA || 0);
@@ -220,7 +221,7 @@ async function topUpGasIfNeeded() {
         return true;
       }
     }
-    console.log('[GAS-NOCONFIRM] Top-up submitted but not yet reflected in balances. It may still settle.');
+    console.log('[GAS-NOCONFIRM] Top-up submitted but not yet reflected in balances.');
     return true; // submitted; not blocking main flow
   } catch (e) {
     console.log(`[GAS-SUBMIT-ERR] ${e?.message || e}`);
@@ -231,10 +232,17 @@ async function topUpGasIfNeeded() {
 // -----------------------------
 // Trading helpers
 // -----------------------------
+async function galaFeeInStable(OUT_CLASS) {
+  // Estimate per-swap fee value in stable by converting GAS_FIXED_FEE_GALA → stable
+  if (!(GAS_FIXED_FEE_GALA > 0)) return 0;
+  const q = await safeQuoteExactIn(GALA, OUT_CLASS, GAS_FIXED_FEE_GALA.toString());
+  return q ? Number(q.outTokenAmount.toString()) : 0;
+}
+
 async function trySellIfProfitable(symbolKey) {
   const balances = await getBalancesMap();
 
-  // If selling GALA, sell only the excess above reserve
+  // If selling GALA, sell only the excess above reserve; for GWETH, sell any positive balance
   let qty = Number(balances[symbolKey] || 0);
   if (symbolKey === 'GALA') {
     const excess = Math.max(0, qty - GAS_MIN_GALA);
@@ -251,21 +259,37 @@ async function trySellIfProfitable(symbolKey) {
   const stable = resolveStableFromBalances(balances);
   const OUT = stable.classKey || GUSDT;
 
-  const q = await safeQuoteExactIn(IN, OUT, qty.toString());
-  if (!q) { console.log(`[SELL-SKIP] No valid quote for ${symbolKey}->${stable.sym || 'GUSDT'}`); return; }
+  // 1) Quote selling qty → stable (pool fee/impact included)
+  const qSell = await safeQuoteExactIn(IN, OUT, qty.toString());
+  if (!qSell) { console.log(`[SELL-SKIP] No valid quote for ${symbolKey}->${stable.sym || 'GUSDT'}`); return; }
+  const sellOutStable = Number(qSell.outTokenAmount.toString());
 
-  const usdcOutNum = Number(q.outTokenAmount.toString());
-  const bps = gainBps(toDollars(USD_CENTS), usdcOutNum);
-  if (bps < MIN_PROFIT_BPS) { console.log(`[SELL-SKIP] ${symbolKey} not profitable (bps=${bps.toFixed(2)})`); return; }
+  // 2) Subtract estimated on-chain swap fee (≈GAS_FIXED_FEE_GALA) valued in stable
+  const feeNowStable = await galaFeeInStable(OUT);
+  const netStable = Math.max(0, sellOutStable - feeNowStable);
+  if (!(netStable > 0)) { console.log('[SELL-SKIP] Fee exceeds proceeds.'); return; }
 
-  const minOut = bpsMulStr(q.outTokenAmount.toString(), SLIPPAGE_BPS);
-  if (DEBUG) console.log(`[SELL-QUOTE] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} feeTier=${q.feeTier} out=${q.outTokenAmount} minOut=${minOut}`);
+  // 3) Hypothetical buy-back test: stable → original token, using ONLY net proceeds
+  const qBuyBack = await safeQuoteExactIn(OUT, IN, netStable.toString());
+  if (!qBuyBack) { console.log(`[SELL-SKIP] No valid quote for round-trip back to ${symbolKey}`); return; }
+
+  const gotBack = Number(qBuyBack.outTokenAmount.toString());
+  const edgeBps = ((gotBack - qty) / Math.max(1e-12, qty)) * 10000; // profit AFTER fee & impact
+
+  if (edgeBps < MIN_PROFIT_BPS) {
+    console.log(`[SELL-SKIP] Round-trip < threshold after fee (edge=${edgeBps.toFixed(2)} bps, need ≥ ${MIN_PROFIT_BPS}).`);
+    return;
+  }
+
+  // 4) Execute the sell with slippage protection
+  const minOut = bpsMulStr(qSell.outTokenAmount.toString(), SLIPPAGE_BPS);
+  if (DEBUG) console.log(`[SELL-QUOTE] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} feeTier=${qSell.feeTier} out=${qSell.outTokenAmount} feeNowStable≈${feeNowStable} minOut=${minOut}`);
 
   if (DRY_RUN) { console.log(`[SELL-DRY] ${symbolKey}->${stable.sym || 'GUSDT'} qty=${qty} minOut=${minOut}`); return; }
 
   try {
     const submitRes = await gswap.swaps.swap(
-      IN, OUT, q.feeTier,
+      IN, OUT, qSell.feeTier,
       { exactIn: qty.toString(), amountOutMinimum: minOut },
       WALLET
     );
@@ -294,16 +318,14 @@ async function buyOneDollar() {
   const usd = toDollars(USD_CENTS);
   if (!(usd > 0)) { console.log('[BUY-SKIP] USD amount <= 0'); return; }
 
-  // Read balances up-front so we can verify if the swap landed later
   const balancesBefore = await getBalancesMap();
   const stable = resolveStableFromBalances(balancesBefore);
   if (!stable.sym) { console.log('[BUY-SKIP] No GUSDT/GUSDC balance detected'); return; }
-  if (stable.amount + 1e-9 < usd) { console.log(`[BUY-SKIP] Not enough ${stable.sym} (need $${usd}, have $${stable.amount})`); return; }
+  if (stable.amount + 1e-9 < usd) { console.log(`[BUY-SKIP] Not enough ${stable.sym} (need $${usd}, have ~$${stable.amount})`); return; }
 
   const buyKey = nextBuyTokenKey();              // 'GALA' or 'GWETH'
   const OUT = buyKey === 'GALA' ? GALA : GWETH;
 
-  // Quote (decides feeTier) + minOut
   const q = await safeQuoteExactIn(stable.classKey, OUT, usd.toString());
   if (!q) { console.log(`[BUY-SKIP] No valid quote for ${stable.sym}->${buyKey} (usd=${usd}).`); return; }
 
@@ -349,7 +371,7 @@ async function buyOneDollar() {
     const msg  = submitErr?.message || submitErr;
     const body = submitErr?.response?.data ? JSON.stringify(submitErr.response.data) : '';
     console.log(`[BUY-SUBMIT-ERR] ${stable.sym}->${buyKey}: ${msg} ${body}`);
-    console.log('Fix tips: endpoints (prod), correct stable (GUSDT/GUSDC), spendable balance, or raise SLIPPAGE_BPS while testing.');
+    console.log('Fix tips: endpoints (prod), correct stable (GUSDT/GUSDC), spendable balance, or adjust SLIPPAGE_BPS while testing.');
   }
 }
 
@@ -365,7 +387,7 @@ async function runOnce() {
     await trySellIfProfitable('GALA');
     await trySellIfProfitable('GWETH');
 
-    // 2) Alternate buy
+    // 2) Alternate buy (hourly flip between GALA and GWETH)
     await buyOneDollar();
   } catch (e) {
     console.error('❌ Bot error:', e?.message || e);

@@ -31,15 +31,19 @@ jobs:
           PRIVATE_KEY:    ${{ secrets.PRIVATE_KEY }}
 
           # Runtime
-          DRY_RUN:        "false"       # real swap
-          BOT_USD_CENTS:  "300"         # $5 for clear balance delta on first real test
-          SLIPPAGE_BPS:   "50"         # 2.0% cushion while testing
-          MIN_PROFIT_BPS: "10"          # sell filter, irrelevant for buy leg
-          TX_WAIT_MS:     "120000"      # 2-minute wait window
+          DRY_RUN:        "false"        # real swap
+          BOT_USD_CENTS:  "300"          # $3 per run (hourly)
+          SLIPPAGE_BPS:   "50"           # 0.50% slippage guard
+          MIN_PROFIT_BPS: "200"          # require ≥ +2.00% round-trip to sell (was 10)
 
-          # Gas reserve (new)
-          GAS_MIN_GALA:        "1500"   # keep at least 1,500 GALA at all times
-          GAS_TOPUP_USD_CENTS: "5000"   # when under 1,500, buy ~$50 of GALA to refill
+          # Fee estimate (counts into profit test)
+          GAS_FIXED_FEE_GALA: "1"        # approx. per-swap fee in GALA
+
+          TX_WAIT_MS:     "120000"       # 2-minute wait window
+
+          # Gas reserve (unchanged)
+          GAS_MIN_GALA:        "1500"    # keep at least 1,500 GALA at all times
+          GAS_TOPUP_USD_CENTS: "5000"    # when under 1,500, buy ~$50 of GALA to refill
 
           # Pin PRODUCTION endpoints explicitly
           GATEWAY_BASE_URL:      "https://gateway-mainnet.galachain.com"
