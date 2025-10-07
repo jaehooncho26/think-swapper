@@ -43,20 +43,20 @@ API base: https://itsgoodtothink.com/.netlify/functions/sidecar
 # Bot Strategy 
 Flip-Flop Micro-Trader on GalaSwap
 
-This bot is designed to run continuously on GitHub Actions every 10 minutes. Its core strategy is simple but systematic:
+This bot is designed to run continuously on GitHub Actions every hour. Its core strategy is simple but systematic:
 
 Profit-taking sells
 
       At the start of each tick, the bot checks whether it holds GALA or GWETH (wrapped ETH on GalaChain).
       If it does, it requests a live swap quote from GalaSwap to convert the entire balance back into GUSDC            (GalaChain USDC).
 
-      If the output would return more than the bot’s assumed cost basis (~$1 per previous buy) plus a profit           threshold (default 0.1%, configurable with MIN_PROFIT_BPS), it executes the swap and realizes the profit.
+      If the output would return more than the bot’s assumed cost basis (~$1 per previous buy) plus a profit           threshold (default 15%, configurable with MIN_PROFIT_BPS), it executes the swap and realizes the profit.
 
       If not profitable, the bot skips and holds the token for another round.
 
 Alternating buys
 
-      After checking for sells, the bot always spends a small, fixed amount of GUSDC (default $1, configurable          via BOT_USD_CENTS).
+      After checking for sells, the bot always spends a small, fixed amount of GUSDC (default $3, configurable          via BOT_USD_CENTS).
 
       It alternates what it buys each cycle:
 
@@ -74,7 +74,7 @@ Risk management & safety
 
       A DRY_RUN mode lets you test the flow without sending real trades.
 
-      The workflow is stateless — every 10-minute run is independent, so if GitHub skips a run or the VM resets,       the bot continues normally on the next tick.
+      The workflow is stateless — every hour is independent
 
 # Environment Variables
 
