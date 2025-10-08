@@ -2,7 +2,7 @@ name: GalaDEX Bot
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour
+    - cron: "*/10 * * * *"   # every 10 minutes
   workflow_dispatch: {}
 
 jobs:
@@ -32,9 +32,9 @@ jobs:
 
           # Runtime
           DRY_RUN:        "false"        # real swap
-          BOT_USD_CENTS:  "300"          # $3 per run (hourly)
+          BOT_USD_CENTS:  "5000"          # $50 per run (hourly)
           SLIPPAGE_BPS:   "50"           # 0.50% slippage guard
-          MIN_PROFIT_BPS: "200"          # require ≥ +2.00% round-trip to sell (was 10)
+          MIN_PROFIT_BPS: "2000"          # require ≥ +20.00% round-trip to sell (was 10)
 
           # Fee estimate (counts into profit test)
           GAS_FIXED_FEE_GALA: "1"        # approx. per-swap fee in GALA
